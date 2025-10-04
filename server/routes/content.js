@@ -54,12 +54,26 @@ router.get('/', optionalAuth, (req, res) => {
 
     const content = db.prepare(query).all(...params);
 
+    // Get all collections to check for hidden status
+    const collections = db.prepare('SELECT name, hidden FROM collections').all();
+    const hiddenCollectionNames = new Set(
+      collections.filter(c => c.hidden).map(c => c.name)
+    );
+
     // Don't send filepath to clients for security
-    const sanitized = content.map(item => ({
+    let sanitized = content.map(item => ({
       ...item,
       filepath: undefined,
-      url: `/content/${item.filename}`
+      url: `/content/${item.filename}`,
+      hidden: Boolean(item.hidden),
+      downloadable: Boolean(item.downloadable),
+      collectionHidden: item.collection && hiddenCollectionNames.has(item.collection)
     }));
+
+    // For non-admins, also filter out items in hidden collections
+    if (!isAdmin) {
+      sanitized = sanitized.filter(item => !item.collectionHidden);
+    }
 
     res.json(sanitized);
   } catch (err) {
@@ -78,14 +92,28 @@ router.get('/:id', optionalAuth, (req, res) => {
       return res.status(404).json({ error: 'Content not found' });
     }
 
+    // Check if content is hidden
     if (content.hidden && !isAdmin) {
       return res.status(404).json({ error: 'Content not found' });
+    }
+
+    // Check if collection is hidden
+    let collectionHidden = false;
+    if (content.collection) {
+      const collection = db.prepare('SELECT hidden FROM collections WHERE name = ?').get(content.collection);
+      collectionHidden = collection && Boolean(collection.hidden);
+      if (collectionHidden && !isAdmin) {
+        return res.status(404).json({ error: 'Content not found' });
+      }
     }
 
     res.json({
       ...content,
       filepath: undefined,
-      url: `/content/${content.filename}`
+      url: `/content/${content.filename}`,
+      hidden: Boolean(content.hidden),
+      downloadable: Boolean(content.downloadable),
+      collectionHidden
     });
   } catch (err) {
     console.error('Error fetching content:', err);
@@ -106,7 +134,7 @@ router.post('/upload', authenticateToken, requireAdmin, upload.single('file'), (
     const ext = path.extname(req.file.originalname).toLowerCase();
     let fileType = 'other';
 
-    if (['.mp4', '.webm', '.mkv', '.avi'].includes(ext)) fileType = 'video';
+    if (['.mp4', '.webm', '.mkv', '.avi', '.mov', '.m4v'].includes(ext)) fileType = 'video';
     else if (['.mp3', '.ogg', '.flac', '.wav', '.m4a'].includes(ext)) fileType = 'audio';
     else if (['.pdf'].includes(ext)) fileType = 'pdf';
     else if (['.epub', '.mobi'].includes(ext)) fileType = 'ebook';
@@ -154,7 +182,7 @@ router.post('/upload', authenticateToken, requireAdmin, upload.single('file'), (
 // Update content metadata (admin only)
 router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
   try {
-    const { collection, hidden, downloadable, metadata } = req.body;
+    const { original_name, collection, hidden, downloadable, metadata } = req.body;
 
     const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
     if (!content) {
@@ -164,6 +192,10 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
     const updates = [];
     const params = [];
 
+    if (original_name !== undefined) {
+      updates.push('original_name = ?');
+      params.push(original_name);
+    }
     if (collection !== undefined) {
       updates.push('collection = ?');
       params.push(collection);
@@ -186,6 +218,11 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
       params.push(req.params.id);
 
       db.prepare(`UPDATE content SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+
+      // Update search index if name changed
+      if (original_name !== undefined) {
+        db.prepare(`UPDATE search_index SET title = ? WHERE content_id = ?`).run(original_name, req.params.id);
+      }
     }
 
     res.json({ message: 'Content updated successfully' });
@@ -205,8 +242,18 @@ router.get('/:id/download', optionalAuth, (req, res) => {
     }
 
     const isAdmin = req.user && req.user.role === 'admin';
+
+    // Check if content is hidden
     if (content.hidden && !isAdmin) {
       return res.status(404).json({ error: 'Content not found' });
+    }
+
+    // Check if collection is hidden
+    if (content.collection && !isAdmin) {
+      const collection = db.prepare('SELECT hidden FROM collections WHERE name = ?').get(content.collection);
+      if (collection && collection.hidden) {
+        return res.status(404).json({ error: 'Content not found' });
+      }
     }
 
     if (!fs.existsSync(content.filepath)) {
@@ -259,10 +306,25 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
 });
 
 // Get collections
-router.get('/collections/list', (req, res) => {
+router.get('/collections/list', optionalAuth, (req, res) => {
   try {
-    const collections = db.prepare('SELECT * FROM collections ORDER BY name').all();
-    res.json(collections);
+    const isAdmin = req.user && req.user.role === 'admin';
+
+    let query = 'SELECT * FROM collections';
+    if (!isAdmin) {
+      query += ' WHERE hidden = 0';
+    }
+    query += ' ORDER BY name';
+
+    const collections = db.prepare(query).all();
+
+    // Convert boolean fields properly
+    const sanitized = collections.map(col => ({
+      ...col,
+      hidden: Boolean(col.hidden)
+    }));
+
+    res.json(sanitized);
   } catch (err) {
     console.error('Error fetching collections:', err);
     res.status(500).json({ error: 'Failed to fetch collections' });
@@ -296,6 +358,64 @@ router.post('/collections', authenticateToken, requireAdmin, (req, res) => {
       console.error('Collection creation error:', err);
       res.status(500).json({ error: 'Failed to create collection' });
     }
+  }
+});
+
+// Update collection (admin only)
+router.patch('/collections/:id', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { name, description, icon, hidden } = req.body;
+
+    const collection = db.prepare('SELECT * FROM collections WHERE id = ?').get(req.params.id);
+    if (!collection) {
+      return res.status(404).json({ error: 'Collection not found' });
+    }
+
+    const updates = [];
+    const params = [];
+
+    if (name !== undefined) {
+      updates.push('name = ?');
+      params.push(name);
+    }
+    if (description !== undefined) {
+      updates.push('description = ?');
+      params.push(description);
+    }
+    if (icon !== undefined) {
+      updates.push('icon = ?');
+      params.push(icon);
+    }
+    if (hidden !== undefined) {
+      updates.push('hidden = ?');
+      params.push(hidden ? 1 : 0);
+    }
+
+    if (updates.length > 0) {
+      params.push(req.params.id);
+
+      try {
+        db.prepare(`UPDATE collections SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+
+        // If name changed, update all content items referencing this collection
+        if (name !== undefined && name !== collection.name) {
+          db.prepare('UPDATE content SET collection = ? WHERE collection = ?').run(name, collection.name);
+        }
+
+        res.json({ message: 'Collection updated successfully' });
+      } catch (err) {
+        if (err.message.includes('UNIQUE constraint failed')) {
+          res.status(400).json({ error: 'A collection with that name already exists' });
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      res.json({ message: 'No changes made' });
+    }
+  } catch (err) {
+    console.error('Collection update error:', err);
+    res.status(500).json({ error: 'Failed to update collection' });
   }
 });
 

@@ -9,6 +9,8 @@ export default function AdminContent() {
   const [selectedCollection, setSelectedCollection] = useState('');
   const [newCollectionName, setNewCollectionName] = useState('');
   const [showCollectionManager, setShowCollectionManager] = useState(false);
+  const [editingContent, setEditingContent] = useState(null);
+  const [editingCollection, setEditingCollection] = useState(null);
 
   useEffect(() => {
     fetchContent();
@@ -30,7 +32,10 @@ export default function AdminContent() {
 
   const fetchCollections = async () => {
     try {
-      const response = await fetch('/api/content/collections/list');
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/content/collections/list', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       const data = await response.json();
       setCollections(data);
     } catch (err) {
@@ -133,6 +138,71 @@ export default function AdminContent() {
     }
   };
 
+  const handleUpdateContent = async (id, updates) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/content/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(updates)
+      });
+
+      if (response.ok) {
+        fetchContent();
+        setEditingContent(null);
+        return true;
+      } else {
+        const error = await response.json();
+        alert('Update failed: ' + (error.error || 'Unknown error'));
+        return false;
+      }
+    } catch (err) {
+      console.error('Update failed:', err);
+      alert('Update failed: ' + err.message);
+      return false;
+    }
+  };
+
+  const handleToggleContentVisibility = async (id, currentHidden) => {
+    await handleUpdateContent(id, { hidden: !currentHidden });
+  };
+
+  const handleUpdateCollection = async (id, updates) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/content/collections/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(updates)
+      });
+
+      if (response.ok) {
+        fetchCollections();
+        fetchContent(); // Refresh content to show updated collection names
+        setEditingCollection(null);
+        return true;
+      } else {
+        const error = await response.json();
+        alert('Update failed: ' + (error.error || 'Unknown error'));
+        return false;
+      }
+    } catch (err) {
+      console.error('Update failed:', err);
+      alert('Update failed: ' + err.message);
+      return false;
+    }
+  };
+
+  const handleToggleCollectionVisibility = async (id, currentHidden) => {
+    await handleUpdateCollection(id, { hidden: !currentHidden });
+  };
+
   const handleDeleteCollection = async (collectionId, collectionName) => {
     const contentInCollection = content.filter(c => c.collection === collectionName);
 
@@ -227,20 +297,66 @@ export default function AdminContent() {
             <div className="grid grid-2">
               {collections.map(collection => (
                 <div key={collection.id} className="card">
-                  <div className="flex-between">
+                  {editingCollection?.id === collection.id ? (
                     <div>
-                      <strong>{collection.name}</strong>
-                      <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
-                        {content.filter(c => c.collection === collection.name).length} items
-                      </p>
+                      <input
+                        type="text"
+                        className="form-input mb-2"
+                        value={editingCollection.name}
+                        onChange={(e) => setEditingCollection({ ...editingCollection, name: e.target.value })}
+                      />
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                          onClick={() => handleUpdateCollection(collection.id, { name: editingCollection.name })}
+                          className="btn btn-sm btn-primary"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setEditingCollection(null)}
+                          className="btn btn-sm btn-secondary"
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     </div>
-                    <button
-                      onClick={() => handleDeleteCollection(collection.id, collection.name)}
-                      className="btn btn-sm btn-danger"
-                    >
-                      Delete
-                    </button>
-                  </div>
+                  ) : (
+                    <div>
+                      <div className="flex-between mb-2">
+                        <div>
+                          <strong>{collection.name}</strong>
+                          {collection.hidden && (
+                            <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: 'var(--warning)' }}>
+                              (Hidden)
+                            </span>
+                          )}
+                          <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+                            {content.filter(c => c.collection === collection.name).length} items
+                          </p>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                          onClick={() => setEditingCollection({ id: collection.id, name: collection.name })}
+                          className="btn btn-sm btn-secondary"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          onClick={() => handleToggleCollectionVisibility(collection.id, collection.hidden)}
+                          className="btn btn-sm btn-secondary"
+                        >
+                          {collection.hidden ? 'Show' : 'Hide'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteCollection(collection.id, collection.name)}
+                          className="btn btn-sm btn-danger"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -301,23 +417,119 @@ export default function AdminContent() {
                 <th>Type</th>
                 <th>Size</th>
                 <th>Collection</th>
+                <th>Visibility</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {content.map(item => (
                 <tr key={item.id}>
-                  <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.original_name}</td>
+                  <td style={{ maxWidth: '300px' }}>
+                    {editingContent?.id === item.id ? (
+                      <input
+                        type="text"
+                        className="form-input"
+                        value={editingContent.original_name}
+                        onChange={(e) => setEditingContent({ ...editingContent, original_name: e.target.value })}
+                        style={{ width: '100%', minWidth: '200px' }}
+                      />
+                    ) : (
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {item.original_name}
+                      </div>
+                    )}
+                  </td>
                   <td>{item.file_type}</td>
                   <td>{formatSize(item.size)}</td>
-                  <td>{item.collection || '-'}</td>
                   <td>
-                    <button
-                      onClick={() => handleDelete(item.id)}
-                      className="btn btn-sm btn-danger"
-                    >
-                      Delete
-                    </button>
+                    {editingContent?.id === item.id ? (
+                      <select
+                        className="form-select"
+                        value={editingContent.collection || ''}
+                        onChange={(e) => setEditingContent({ ...editingContent, collection: e.target.value || null })}
+                      >
+                        <option value="">None</option>
+                        {collections.map(c => (
+                          <option key={c.id} value={c.name}>{c.name}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      item.collection || '-'
+                    )}
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                      <span style={{
+                        fontSize: '0.75rem',
+                        padding: '2px 6px',
+                        borderRadius: '3px',
+                        background: item.hidden ? 'var(--warning)' : 'var(--success)',
+                        color: 'white',
+                        display: 'inline-block',
+                        width: 'fit-content'
+                      }}>
+                        {item.hidden ? 'Hidden' : 'Visible'}
+                      </span>
+                      {item.collectionHidden && (
+                        <span style={{
+                          fontSize: '0.75rem',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          background: 'var(--danger)',
+                          color: 'white',
+                          display: 'inline-block',
+                          width: 'fit-content'
+                        }}>
+                          Collection Hidden
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    {editingContent?.id === item.id ? (
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                          onClick={() => handleUpdateContent(item.id, {
+                            original_name: editingContent.original_name,
+                            collection: editingContent.collection
+                          })}
+                          className="btn btn-sm btn-primary"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setEditingContent(null)}
+                          className="btn btn-sm btn-secondary"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                          onClick={() => setEditingContent({
+                            id: item.id,
+                            original_name: item.original_name,
+                            collection: item.collection
+                          })}
+                          className="btn btn-sm btn-secondary"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => handleToggleContentVisibility(item.id, item.hidden)}
+                          className="btn btn-sm btn-secondary"
+                        >
+                          {item.hidden ? 'Show' : 'Hide'}
+                        </button>
+                        <button
+                          onClick={() => handleDelete(item.id)}
+                          className="btn btn-sm btn-danger"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

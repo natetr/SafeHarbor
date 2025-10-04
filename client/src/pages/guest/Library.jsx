@@ -13,13 +13,28 @@ export default function GuestLibrary() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('libraries'); // 'libraries' or 'uploads'
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [viewAsGuest, setViewAsGuest] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    // Check if user is admin
+    const token = localStorage.getItem('token');
+    if (token) {
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        setIsAdmin(payload.role === 'admin');
+      } catch (err) {
+        setIsAdmin(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     fetchContent();
     fetchZims();
     fetchCollections();
-  }, [selectedCollection, selectedType]);
+  }, [selectedCollection, selectedType, viewAsGuest]);
 
   const fetchContent = async () => {
     try {
@@ -29,7 +44,14 @@ export default function GuestLibrary() {
       if (selectedType) params.append('type', selectedType);
       if (params.toString()) url += '?' + params.toString();
 
-      const response = await fetch(url);
+      const token = localStorage.getItem('token');
+      const headers = {};
+      // If admin is viewing as guest, don't send token
+      if (token && !(isAdmin && viewAsGuest)) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(url, { headers });
       const data = await response.json();
       setContent(data);
     } catch (err) {
@@ -41,7 +63,14 @@ export default function GuestLibrary() {
 
   const fetchZims = async () => {
     try {
-      const response = await fetch('/api/zim');
+      const token = localStorage.getItem('token');
+      const headers = {};
+      // If admin is viewing as guest, don't send token
+      if (token && !(isAdmin && viewAsGuest)) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch('/api/zim', { headers });
       const data = await response.json();
       setZims(data);
     } catch (err) {
@@ -51,7 +80,14 @@ export default function GuestLibrary() {
 
   const fetchCollections = async () => {
     try {
-      const response = await fetch('/api/content/collections/list');
+      const token = localStorage.getItem('token');
+      const headers = {};
+      // If admin is viewing as guest, don't send token
+      if (token && !(isAdmin && viewAsGuest)) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch('/api/content/collections/list', { headers });
       const data = await response.json();
       setCollections(data);
     } catch (err) {
@@ -120,6 +156,29 @@ export default function GuestLibrary() {
         <p className="text-muted" style={{ fontSize: '1rem' }}>
           Your offline knowledge and media collection
         </p>
+
+        {/* Admin View Toggle */}
+        {isAdmin && (
+          <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem' }}>
+            <span style={{
+              fontSize: '0.875rem',
+              padding: '4px 12px',
+              borderRadius: '4px',
+              background: viewAsGuest ? 'var(--warning)' : 'var(--success)',
+              color: 'white',
+              fontWeight: 'bold'
+            }}>
+              {viewAsGuest ? '👁️ Guest View' : '🔧 Admin View'}
+            </span>
+            <button
+              onClick={() => setViewAsGuest(!viewAsGuest)}
+              className="btn btn-sm btn-secondary"
+              style={{ fontSize: '0.875rem' }}
+            >
+              Switch to {viewAsGuest ? 'Admin' : 'Guest'} View
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Search Box */}

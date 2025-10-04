@@ -72,9 +72,17 @@ export function initDatabase() {
       name TEXT UNIQUE NOT NULL,
       description TEXT,
       icon TEXT,
+      hidden BOOLEAN DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Add hidden column to existing collections table if it doesn't exist
+  try {
+    db.exec(`ALTER TABLE collections ADD COLUMN hidden BOOLEAN DEFAULT 0`);
+  } catch (err) {
+    // Column already exists, ignore error
+  }
 
   // Network configuration table
   db.exec(`

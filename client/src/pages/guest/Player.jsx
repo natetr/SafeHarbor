@@ -14,7 +14,13 @@ export default function GuestPlayer() {
 
   const fetchContent = async () => {
     try {
-      const response = await fetch(`/api/content/${id}`);
+      const token = localStorage.getItem('token');
+      const headers = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(`/api/content/${id}`, { headers });
       if (!response.ok) {
         throw new Error('Content not found');
       }
