@@ -1,0 +1,12 @@
+node_modules/
+client/node_modules/
+client/dist/
+.env
+*.db
+*.db-journal
+*.log
+data/
+content/
+zim/
+uploads/
+.DS_Store
