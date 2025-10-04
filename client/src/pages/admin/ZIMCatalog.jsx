@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
 import StorageInfo from '../../components/StorageInfo';
@@ -9,8 +9,8 @@ export default function ZIMCatalog() {
 
   const [catalog, setCatalog] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  const [page, setPage] = useState(0);
+  const [totalResults, setTotalResults] = useState(0);
+  const [page, setPage] = useState(parseInt(searchParams.get('page')) || 1);
   const [searchQuery, setSearchQuery] = useState(searchParams.get('q') || '');
   const [selectedCategory, setSelectedCategory] = useState(searchParams.get('category') || '');
   const [selectedLanguage, setSelectedLanguage] = useState(searchParams.get('lang') || '');
@@ -18,7 +18,7 @@ export default function ZIMCatalog() {
   const [languages, setLanguages] = useState([]);
   const [sortBy, setSortBy] = useState(searchParams.get('sort') || 'name');
   const [sortDirection, setSortDirection] = useState(searchParams.get('dir') || 'asc');
-  const observerTarget = useRef(null);
+  const itemsPerPage = 50;
 
   // Fetch available languages on mount
   useEffect(() => {
@@ -37,6 +37,11 @@ export default function ZIMCatalog() {
     fetchLanguages();
   }, []);
 
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, selectedCategory, selectedLanguage, sortBy, sortDirection]);
+
   useEffect(() => {
     // Update URL params
     const params = {};
@@ -45,45 +50,21 @@ export default function ZIMCatalog() {
     if (selectedLanguage) params.lang = selectedLanguage;
     if (sortBy !== 'name') params.sort = sortBy;
     if (sortDirection !== 'asc') params.dir = sortDirection;
+    if (page !== 1) params.page = page.toString();
     setSearchParams(params, { replace: true });
 
-    // Reset page and fetch new results
-    setPage(0);
-    setCatalog([]);
-    fetchCatalog(true);
-  }, [searchQuery, selectedCategory, selectedLanguage, sortBy, sortDirection]);
+    fetchCatalog();
+  }, [page, searchQuery, selectedCategory, selectedLanguage, sortBy, sortDirection]);
 
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      entries => {
-        if (entries[0].isIntersecting && hasMore && !loading) {
-          fetchCatalog(false);
-        }
-      },
-      { threshold: 1.0 }
-    );
-
-    if (observerTarget.current) {
-      observer.observe(observerTarget.current);
-    }
-
-    return () => {
-      if (observerTarget.current) {
-        observer.unobserve(observerTarget.current);
-      }
-    };
-  }, [hasMore, loading, page]);
-
-  const fetchCatalog = async (reset = false) => {
+  const fetchCatalog = async () => {
     if (loading) return;
     setLoading(true);
 
     try {
       const token = localStorage.getItem('token');
-      const currentPage = reset ? 0 : page;
-      const startIndex = currentPage * 50;
+      const startIndex = (page - 1) * itemsPerPage;
 
-      let url = `/api/zim/catalog?count=50&start=${startIndex}`;
+      let url = `/api/zim/catalog?count=${itemsPerPage}&start=${startIndex}`;
       if (selectedCategory) url += `&category=${selectedCategory}`;
       if (selectedLanguage) url += `&lang=${selectedLanguage}`;
       if (searchQuery) url += `&q=${encodeURIComponent(searchQuery)}`;
@@ -93,9 +74,10 @@ export default function ZIMCatalog() {
       });
 
       const data = await response.json();
+      const entries = data.entries || data; // Support both old and new response format
 
       // Sort data based on selected sort option and direction
-      const sortedData = [...data].sort((a, b) => {
+      const sortedData = [...entries].sort((a, b) => {
         let comparison = 0;
         switch (sortBy) {
           case 'name':
@@ -113,20 +95,25 @@ export default function ZIMCatalog() {
         return sortDirection === 'asc' ? comparison : -comparison;
       });
 
-      if (reset) {
-        setCatalog(sortedData);
-        setPage(1);
+      setCatalog(sortedData);
 
-        // Extract unique categories
-        const cats = [...new Set(data.map(item => item.category).filter(Boolean))];
+      // Extract unique categories on first load
+      if (page === 1) {
+        const cats = [...new Set(entries.map(item => item.category).filter(Boolean))];
         setCategories(cats.sort());
-      } else {
-        setCatalog(prev => [...prev, ...sortedData]);
-        setPage(prev => prev + 1);
       }
 
-      // Stop loading more if we got less than 50 results (end of results)
-      setHasMore(data.length === 50);
+      // Use actual total results from API if available
+      if (data.totalResults !== undefined && data.totalResults !== null) {
+        setTotalResults(data.totalResults);
+      } else {
+        // Fallback to estimation if API doesn't provide total
+        if (entries.length === itemsPerPage) {
+          setTotalResults((page + 1) * itemsPerPage);
+        } else {
+          setTotalResults(startIndex + entries.length);
+        }
+      }
     } catch (err) {
       console.error('Failed to fetch catalog:', err);
       alert('Failed to fetch catalog. Make sure you have internet connection.');
@@ -266,6 +253,7 @@ export default function ZIMCatalog() {
                 setSelectedLanguage('');
                 setSortBy('name');
                 setSortDirection('asc');
+                setPage(1);
               }}
               className="btn btn-secondary"
               style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}
@@ -275,6 +263,13 @@ export default function ZIMCatalog() {
           </div>
         </div>
       </div>
+
+      {/* Results info */}
+      {!loading && catalog.length > 0 && (
+        <div style={{ marginBottom: '1rem', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+          Showing {((page - 1) * itemsPerPage) + 1} - {((page - 1) * itemsPerPage) + catalog.length} of {totalResults.toLocaleString()} results
+        </div>
+      )}
 
       {/* Catalog Grid */}
       <div className="grid grid-3">
@@ -345,21 +340,40 @@ export default function ZIMCatalog() {
       {/* Loading indicator */}
       {loading && (
         <div style={{ textAlign: 'center', padding: '2rem' }}>
-          <p>Loading more ZIMs...</p>
+          <p>Loading ZIMs...</p>
         </div>
       )}
 
-      {/* Infinite scroll trigger */}
-      <div ref={observerTarget} style={{ height: '20px' }} />
-
-      {/* End message */}
-      {!hasMore && catalog.length > 0 && (
-        <div style={{ textAlign: 'center', padding: '2rem' }}>
-          <p className="text-muted">
-            {searchQuery || selectedCategory || selectedLanguage
-              ? 'No more results found'
-              : 'No more ZIMs to load'}
-          </p>
+      {/* Pagination controls */}
+      {!loading && catalog.length > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', marginTop: '2rem', alignItems: 'center' }}>
+          <button
+            onClick={() => setPage(1)}
+            disabled={page === 1}
+            className="btn btn-secondary"
+            style={{ padding: '0.5rem 0.75rem' }}
+          >
+            First
+          </button>
+          <button
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={page === 1}
+            className="btn btn-secondary"
+            style={{ padding: '0.5rem 0.75rem' }}
+          >
+            Previous
+          </button>
+          <span style={{ padding: '0 1rem', fontSize: '0.875rem' }}>
+            Page {page}
+          </span>
+          <button
+            onClick={() => setPage(p => p + 1)}
+            disabled={catalog.length < itemsPerPage}
+            className="btn btn-secondary"
+            style={{ padding: '0.5rem 0.75rem' }}
+          >
+            Next
+          </button>
         </div>
       )}
 

@@ -204,11 +204,9 @@ router.get('/catalog', authenticateToken, requireAdmin, async (req, res) => {
     const { count = 50, start = 0, category, lang, q } = req.query;
     let url = `https://library.kiwix.org/catalog/v2/entries?count=${count}&start=${start}`;
 
-    // Use provided language or default to English
+    // Only add language filter if explicitly provided
     if (lang) {
       url += `&lang=${lang}`;
-    } else {
-      url += `&lang=eng`;
     }
 
     if (category) url += `&category=${category}`;
@@ -220,6 +218,11 @@ router.get('/catalog', authenticateToken, requireAdmin, async (req, res) => {
 
     // Parse XML catalog
     const xml = response.data;
+
+    // Extract total results from XML
+    const totalResultsMatch = xml.match(/<totalResults>(\d+)<\/totalResults>/);
+    const totalResults = totalResultsMatch ? parseInt(totalResultsMatch[1]) : null;
+
     const entries = [];
     const entryMatches = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
 
@@ -266,7 +269,12 @@ router.get('/catalog', authenticateToken, requireAdmin, async (req, res) => {
       });
     });
 
-    res.json(entries);
+    res.json({
+      entries,
+      totalResults,
+      count: entries.length,
+      start: parseInt(start)
+    });
   } catch (err) {
     console.error('Error fetching Kiwix catalog:', err);
     res.status(500).json({ error: 'Failed to fetch Kiwix catalog: ' + err.message });
