@@ -10,6 +10,7 @@ export default function AdminZIM() {
   const [downloadUrl, setDownloadUrl] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState([]);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   useEffect(() => {
     fetchLibraries();
@@ -167,6 +168,82 @@ export default function AdminZIM() {
     }
   };
 
+  const handleCheckUpdates = async () => {
+    setCheckingUpdates(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/check-updates/all', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const updatesAvailable = data.results.filter(r => r.updateAvailable).length;
+
+        if (updatesAvailable > 0) {
+          alert(`Found ${updatesAvailable} update(s) available!`);
+        } else {
+          alert('All ZIM libraries are up to date.');
+        }
+
+        fetchLibraries();
+      } else {
+        alert('Failed to check for updates');
+      }
+    } catch (err) {
+      console.error('Update check failed:', err);
+      alert('Update check failed: ' + err.message);
+    } finally {
+      setCheckingUpdates(false);
+    }
+  };
+
+  const handleUpdate = async (id) => {
+    if (!confirm('Download and install this update? The old version will be backed up during the process.')) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/zim/${id}/update`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        alert('Update download started! Check back in a few minutes.');
+        fetchLibraries();
+      } else {
+        const error = await response.json();
+        alert('Update failed: ' + (error.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Update failed:', err);
+      alert('Update failed: ' + err.message);
+    }
+  };
+
+  const handleToggleAutoUpdate = async (id, currentValue) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/zim/${id}/auto-update`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ enabled: !currentValue })
+      });
+
+      if (response.ok) {
+        fetchLibraries();
+      } else {
+        alert('Failed to update auto-update setting');
+      }
+    } catch (err) {
+      console.error('Failed to toggle auto-update:', err);
+      alert('Failed to update auto-update setting');
+    }
+  };
+
   return (
     <div>
       <h1 className="mb-3">ZIM Libraries</h1>
@@ -291,7 +368,16 @@ export default function AdminZIM() {
       )}
 
       <div className="card">
-        <h2 className="card-header">Installed Libraries ({libraries.length})</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2 className="card-header" style={{ margin: 0 }}>Installed Libraries ({libraries.length})</h2>
+          <button
+            onClick={handleCheckUpdates}
+            disabled={checkingUpdates || libraries.length === 0}
+            className="btn btn-primary"
+          >
+            {checkingUpdates ? 'Checking...' : 'Check for Updates'}
+          </button>
+        </div>
         {libraries.length === 0 ? (
           <div>
             <p className="text-muted">No ZIM libraries installed yet.</p>
@@ -308,32 +394,75 @@ export default function AdminZIM() {
                 <th>Language</th>
                 <th>Size</th>
                 <th>Articles</th>
+                <th>Auto-Update</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {libraries.map(lib => (
-                <tr key={lib.id}>
-                  <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{decodeHtml(lib.title)}</td>
-                  <td>
-                    {lib.language
-                      ? lib.language.split(',').length > 1
-                        ? `${lib.language.split(',').length} languages`
-                        : lib.language.toUpperCase()
-                      : '-'}
-                  </td>
-                  <td>{formatSize(lib.size)}</td>
-                  <td>{lib.article_count?.toLocaleString() || '-'}</td>
-                  <td>
-                    <button
-                      onClick={() => handleDelete(lib.id)}
-                      className="btn btn-sm btn-danger"
-                    >
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {libraries.map(lib => {
+                const hasUpdate = lib.available_update_url && lib.available_update_version;
+                return (
+                  <tr key={lib.id}>
+                    <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {decodeHtml(lib.title)}
+                      {hasUpdate && (
+                        <span style={{
+                          marginLeft: '0.5rem',
+                          background: 'var(--warning)',
+                          color: 'white',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          fontSize: '0.7rem',
+                          fontWeight: 'bold'
+                        }}>
+                          UPDATE
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {lib.language
+                        ? lib.language.split(',').length > 1
+                          ? `${lib.language.split(',').length} languages`
+                          : lib.language.toUpperCase()
+                        : '-'}
+                    </td>
+                    <td>{formatSize(lib.size)}</td>
+                    <td>{lib.article_count?.toLocaleString() || '-'}</td>
+                    <td>
+                      <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={lib.auto_update_enabled || false}
+                          onChange={() => handleToggleAutoUpdate(lib.id, lib.auto_update_enabled)}
+                          style={{ cursor: 'pointer' }}
+                        />
+                        <span style={{ fontSize: '0.875rem' }}>
+                          {lib.auto_update_enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </label>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        {hasUpdate && (
+                          <button
+                            onClick={() => handleUpdate(lib.id)}
+                            className="btn btn-sm btn-primary"
+                            title={`Update to version ${lib.available_update_version}`}
+                          >
+                            Update
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleDelete(lib.id)}
+                          className="btn btn-sm btn-danger"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}

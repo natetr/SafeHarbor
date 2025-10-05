@@ -61,6 +61,11 @@ export function initDatabase() {
       media_count INTEGER,
       url TEXT,
       hidden BOOLEAN DEFAULT 0,
+      last_checked_at DATETIME,
+      available_update_url TEXT,
+      available_update_version TEXT,
+      available_update_size INTEGER,
+      auto_update_enabled BOOLEAN DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -77,11 +82,49 @@ export function initDatabase() {
     )
   `);
 
+  // ZIM update settings table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zim_update_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      check_interval_hours INTEGER DEFAULT 24,
+      auto_download_enabled BOOLEAN DEFAULT 0,
+      min_space_buffer_gb REAL DEFAULT 5.0,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Add hidden column to existing collections table if it doesn't exist
   try {
     db.exec(`ALTER TABLE collections ADD COLUMN hidden BOOLEAN DEFAULT 0`);
   } catch (err) {
     // Column already exists, ignore error
+  }
+
+  // Add update tracking columns to existing zim_libraries table if they don't exist
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN last_checked_at DATETIME`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_url TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_version TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_size INTEGER`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN auto_update_enabled BOOLEAN DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
   }
 
   // Network configuration table
@@ -194,6 +237,15 @@ export function initDatabase() {
       // Collection already exists
     }
   });
+
+  // Initialize default ZIM update settings if not exists
+  const updateSettings = db.prepare('SELECT id FROM zim_update_settings WHERE id = 1').get();
+  if (!updateSettings) {
+    db.prepare(`
+      INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb)
+      VALUES (1, 24, 0, 5.0)
+    `).run();
+  }
 
   console.log('Database initialized successfully');
 }

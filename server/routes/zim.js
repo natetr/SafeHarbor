@@ -6,6 +6,7 @@ import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/aut
 import db from '../database/init.js';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import si from 'systeminformation';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,7 +20,34 @@ const KIWIX_SERVE_PATH = process.env.KIWIX_SERVE_PATH || path.join(__dirname, '.
 let kiwixProcess = null;
 
 // Track active downloads
-const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status }
+const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
+
+// Helper function to extract ZIM name and version from filename
+function parseZimFilename(filename) {
+  // Example: wikipedia_en_all_maxi_2024-01.zim -> { name: 'wikipedia_en_all_maxi', version: '2024-01' }
+  const match = filename.match(/^(.+?)_(\d{4}-\d{2})\.zim$/);
+  if (match) {
+    return { name: match[1], version: match[2] };
+  }
+  // Fallback: treat entire filename (without .zim) as name
+  return { name: filename.replace('.zim', ''), version: null };
+}
+
+// Helper function to check available disk space
+async function checkDiskSpace() {
+  try {
+    const fsSize = await si.fsSize();
+    const mainFs = fsSize.find(fs => fs.mount === '/') || fsSize[0];
+    return {
+      available: mainFs.available,
+      total: mainFs.size,
+      used: mainFs.used
+    };
+  } catch (err) {
+    console.error('Error checking disk space:', err);
+    return null;
+  }
+}
 
 // Start Kiwix server
 function startKiwixServer() {
@@ -621,7 +649,451 @@ router.get('/:id/content/*', async (req, res) => {
   }
 });
 
-// Export startKiwixServer so it can be called after DB init
-export { startKiwixServer };
+// Check for updates for a specific ZIM
+router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+
+    if (!library) {
+      return res.status(404).json({ error: 'ZIM library not found' });
+    }
+
+    const parsed = parseZimFilename(library.filename);
+
+    // Query Kiwix catalog for latest version
+    let url = `https://library.kiwix.org/catalog/v2/entries?count=50`;
+    if (parsed.name) {
+      url += `&q=${encodeURIComponent(parsed.name)}`;
+    }
+
+    const response = await axios.get(url, { timeout: 15000 });
+    const xml = response.data;
+
+    const entries = [];
+    const entryMatches = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
+
+    entryMatches.forEach(entry => {
+      const getTag = (tag) => {
+        const match = entry.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`));
+        return match ? match[1] : null;
+      };
+
+      const downloadMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/acquisition\/open-access"[^>]*href="([^"]*)"/);
+      let downloadUrl = downloadMatch ? downloadMatch[1] : null;
+      const sizeMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/acquisition\/open-access"[^>]*length="([^"]*)"/);
+      const size = sizeMatch ? parseInt(sizeMatch[1]) : null;
+
+      if (downloadUrl && downloadUrl.endsWith('.meta4')) {
+        downloadUrl = downloadUrl.replace('.zim.meta4', '.zim');
+      }
+
+      const filename = downloadUrl ? path.basename(downloadUrl) : null;
+      if (filename) {
+        const parsedEntry = parseZimFilename(filename);
+        entries.push({
+          name: getTag('name'),
+          title: getTag('title'),
+          url: downloadUrl,
+          size: size,
+          filename: filename,
+          parsedName: parsedEntry.name,
+          version: parsedEntry.version
+        });
+      }
+    });
+
+    // Find matching entry with newer version
+    const matchingEntries = entries.filter(e =>
+      e.parsedName && parsed.name && e.parsedName.toLowerCase().includes(parsed.name.toLowerCase())
+    );
+
+    let updateAvailable = false;
+    let latestEntry = null;
+
+    for (const entry of matchingEntries) {
+      if (entry.version && parsed.version) {
+        // Compare versions (dates)
+        if (entry.version > parsed.version) {
+          if (!latestEntry || entry.version > latestEntry.version) {
+            latestEntry = entry;
+            updateAvailable = true;
+          }
+        }
+      }
+    }
+
+    // Update database with findings
+    const now = new Date().toISOString();
+    if (updateAvailable && latestEntry) {
+      db.prepare(`
+        UPDATE zim_libraries
+        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?
+        WHERE id = ?
+      `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, req.params.id);
+
+      res.json({
+        updateAvailable: true,
+        currentVersion: parsed.version,
+        latestVersion: latestEntry.version,
+        updateUrl: latestEntry.url,
+        updateSize: latestEntry.size,
+        updateTitle: latestEntry.title
+      });
+    } else {
+      db.prepare(`
+        UPDATE zim_libraries
+        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL
+        WHERE id = ?
+      `).run(now, req.params.id);
+
+      res.json({
+        updateAvailable: false,
+        currentVersion: parsed.version,
+        message: 'No updates available'
+      });
+    }
+  } catch (err) {
+    console.error('Update check error:', err);
+    res.status(500).json({ error: 'Failed to check for updates: ' + err.message });
+  }
+});
+
+// Check for updates for all ZIMs
+router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const libraries = db.prepare('SELECT * FROM zim_libraries').all();
+    const results = [];
+
+    for (const library of libraries) {
+      try {
+        const parsed = parseZimFilename(library.filename);
+
+        let url = `https://library.kiwix.org/catalog/v2/entries?count=50`;
+        if (parsed.name) {
+          url += `&q=${encodeURIComponent(parsed.name)}`;
+        }
+
+        const response = await axios.get(url, { timeout: 15000 });
+        const xml = response.data;
+
+        const entries = [];
+        const entryMatches = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
+
+        entryMatches.forEach(entry => {
+          const getTag = (tag) => {
+            const match = entry.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`));
+            return match ? match[1] : null;
+          };
+
+          const downloadMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/acquisition\/open-access"[^>]*href="([^"]*)"/);
+          let downloadUrl = downloadMatch ? downloadMatch[1] : null;
+          const sizeMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/acquisition\/open-access"[^>]*length="([^"]*)"/);
+          const size = sizeMatch ? parseInt(sizeMatch[1]) : null;
+
+          if (downloadUrl && downloadUrl.endsWith('.meta4')) {
+            downloadUrl = downloadUrl.replace('.zim.meta4', '.zim');
+          }
+
+          const filename = downloadUrl ? path.basename(downloadUrl) : null;
+          if (filename) {
+            const parsedEntry = parseZimFilename(filename);
+            entries.push({
+              name: getTag('name'),
+              title: getTag('title'),
+              url: downloadUrl,
+              size: size,
+              filename: filename,
+              parsedName: parsedEntry.name,
+              version: parsedEntry.version
+            });
+          }
+        });
+
+        const matchingEntries = entries.filter(e =>
+          e.parsedName && parsed.name && e.parsedName.toLowerCase().includes(parsed.name.toLowerCase())
+        );
+
+        let updateAvailable = false;
+        let latestEntry = null;
+
+        for (const entry of matchingEntries) {
+          if (entry.version && parsed.version) {
+            if (entry.version > parsed.version) {
+              if (!latestEntry || entry.version > latestEntry.version) {
+                latestEntry = entry;
+                updateAvailable = true;
+              }
+            }
+          }
+        }
+
+        const now = new Date().toISOString();
+        if (updateAvailable && latestEntry) {
+          db.prepare(`
+            UPDATE zim_libraries
+            SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?
+            WHERE id = ?
+          `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, library.id);
+
+          results.push({
+            id: library.id,
+            title: library.title,
+            updateAvailable: true,
+            currentVersion: parsed.version,
+            latestVersion: latestEntry.version,
+            updateSize: latestEntry.size
+          });
+        } else {
+          db.prepare(`
+            UPDATE zim_libraries
+            SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL
+            WHERE id = ?
+          `).run(now, library.id);
+
+          results.push({
+            id: library.id,
+            title: library.title,
+            updateAvailable: false,
+            currentVersion: parsed.version
+          });
+        }
+      } catch (err) {
+        console.error(`Failed to check updates for ${library.title}:`, err.message);
+        results.push({
+          id: library.id,
+          title: library.title,
+          error: err.message
+        });
+      }
+    }
+
+    res.json({ results, checkedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Update check error:', err);
+    res.status(500).json({ error: 'Failed to check for updates' });
+  }
+});
+
+// Update a ZIM library
+router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+
+    if (!library) {
+      return res.status(404).json({ error: 'ZIM library not found' });
+    }
+
+    if (!library.available_update_url) {
+      return res.status(400).json({ error: 'No update available. Check for updates first.' });
+    }
+
+    // Check disk space
+    const settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+    const minSpaceBuffer = (settings?.min_space_buffer_gb || 5) * 1024 * 1024 * 1024; // Convert GB to bytes
+    const diskSpace = await checkDiskSpace();
+
+    if (diskSpace) {
+      const requiredSpace = library.available_update_size + minSpaceBuffer;
+      if (diskSpace.available < requiredSpace) {
+        const availableGB = (diskSpace.available / 1024 / 1024 / 1024).toFixed(2);
+        const requiredGB = (requiredSpace / 1024 / 1024 / 1024).toFixed(2);
+        return res.status(400).json({
+          error: `Insufficient disk space. Available: ${availableGB}GB, Required: ${requiredGB}GB (including ${settings?.min_space_buffer_gb || 5}GB buffer)`
+        });
+      }
+    }
+
+    const downloadUrl = library.available_update_url;
+    const newFilename = path.basename(downloadUrl);
+    const tempFilepath = path.join(ZIM_DIR, newFilename + '.downloading');
+    const finalFilepath = path.join(ZIM_DIR, newFilename);
+    const backupFilepath = library.filepath + '.backup';
+
+    // Check if already downloading
+    if (activeDownloads.has(newFilename)) {
+      return res.status(400).json({ error: 'Update download already in progress' });
+    }
+
+    // Initialize download tracking
+    activeDownloads.set(newFilename, {
+      url: downloadUrl,
+      filename: newFilename,
+      title: library.title,
+      progress: 0,
+      totalSize: library.available_update_size || 0,
+      downloadedSize: 0,
+      status: 'starting',
+      isUpdate: true,
+      originalId: library.id
+    });
+
+    res.json({
+      message: 'Update download started',
+      filename: newFilename
+    });
+
+    // Download file
+    const writer = fs.createWriteStream(tempFilepath);
+    const response = await axios({
+      url: downloadUrl,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: 0,
+      onDownloadProgress: (progressEvent) => {
+        const download = activeDownloads.get(newFilename);
+        if (download) {
+          if (progressEvent.total) {
+            download.totalSize = progressEvent.total;
+          }
+          download.downloadedSize = progressEvent.loaded || 0;
+          download.progress = download.totalSize
+            ? Math.round((progressEvent.loaded / download.totalSize) * 100)
+            : 0;
+          download.status = 'downloading';
+        }
+      }
+    });
+
+    response.data.pipe(writer);
+
+    writer.on('finish', async () => {
+      try {
+        activeDownloads.delete(newFilename);
+
+        // Backup old file
+        if (fs.existsSync(library.filepath)) {
+          fs.renameSync(library.filepath, backupFilepath);
+        }
+
+        // Move new file to final location
+        fs.renameSync(tempFilepath, finalFilepath);
+
+        // Get file size
+        const stats = fs.statSync(finalFilepath);
+
+        // Update database
+        db.prepare(`
+          UPDATE zim_libraries
+          SET filename = ?, filepath = ?, size = ?,
+              available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
+              url = ?
+          WHERE id = ?
+        `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.id);
+
+        // Restart Kiwix server
+        restartKiwixServer();
+
+        // Delete backup after successful restart
+        setTimeout(() => {
+          if (fs.existsSync(backupFilepath)) {
+            fs.unlinkSync(backupFilepath);
+          }
+        }, 5000);
+
+        console.log(`ZIM update complete: ${library.title} -> ${newFilename}`);
+      } catch (err) {
+        console.error('Update finalization error:', err);
+        // Rollback: restore backup if it exists
+        if (fs.existsSync(backupFilepath)) {
+          if (fs.existsSync(finalFilepath)) {
+            fs.unlinkSync(finalFilepath);
+          }
+          fs.renameSync(backupFilepath, library.filepath);
+          restartKiwixServer();
+        }
+      }
+    });
+
+    writer.on('error', (err) => {
+      console.error('Update download error:', err);
+      activeDownloads.delete(newFilename);
+      if (fs.existsSync(tempFilepath)) {
+        fs.unlinkSync(tempFilepath);
+      }
+    });
+  } catch (err) {
+    console.error('Update error:', err);
+    res.status(500).json({ error: 'Failed to start update: ' + err.message });
+  }
+});
+
+// Toggle auto-update for a ZIM library
+router.patch('/:id/auto-update', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { enabled } = req.body;
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+
+    db.prepare('UPDATE zim_libraries SET auto_update_enabled = ? WHERE id = ?')
+      .run(enabled ? 1 : 0, req.params.id);
+
+    res.json({ message: 'Auto-update setting updated', enabled });
+  } catch (err) {
+    console.error('Auto-update toggle error:', err);
+    res.status(500).json({ error: 'Failed to update auto-update setting' });
+  }
+});
+
+// Get ZIM update settings
+router.get('/update-settings', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    let settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+
+    if (!settings) {
+      // Create default settings if they don't exist
+      db.prepare(`
+        INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb)
+        VALUES (1, 24, 0, 5.0)
+      `).run();
+      settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+    }
+
+    res.json(settings);
+  } catch (err) {
+    console.error('Error fetching update settings:', err);
+    res.status(500).json({ error: 'Failed to fetch update settings' });
+  }
+});
+
+// Update ZIM update settings
+router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { check_interval_hours, auto_download_enabled, min_space_buffer_gb } = req.body;
+
+    const updates = [];
+    const params = [];
+
+    if (check_interval_hours !== undefined) {
+      updates.push('check_interval_hours = ?');
+      params.push(check_interval_hours);
+    }
+    if (auto_download_enabled !== undefined) {
+      updates.push('auto_download_enabled = ?');
+      params.push(auto_download_enabled ? 1 : 0);
+    }
+    if (min_space_buffer_gb !== undefined) {
+      updates.push('min_space_buffer_gb = ?');
+      params.push(min_space_buffer_gb);
+    }
+
+    if (updates.length > 0) {
+      updates.push('updated_at = ?');
+      params.push(new Date().toISOString());
+      params.push(1); // id = 1
+
+      db.prepare(`UPDATE zim_update_settings SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    }
+
+    res.json({ message: 'Update settings saved successfully' });
+  } catch (err) {
+    console.error('Update settings error:', err);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Export startKiwixServer and restartKiwixServer so they can be called after DB init
+export { startKiwixServer, restartKiwixServer };
 
 export default router;

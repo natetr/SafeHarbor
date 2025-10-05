@@ -20,6 +20,9 @@ import storageRoutes from './routes/storage.js';
 // Import database initialization
 import { initDatabase } from './database/init.js';
 
+// Import update scheduler
+import { startUpdateScheduler } from './services/updateScheduler.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -48,6 +51,15 @@ initDatabase();
 // Start Kiwix server after database is ready
 setTimeout(() => {
   startKiwixServer();
+  // Start the update scheduler (pass restartKiwixServer callback from zim routes)
+  startUpdateScheduler(() => {
+    // Import restartKiwixServer dynamically to avoid circular dependency
+    import('./routes/zim.js').then(module => {
+      if (module.restartKiwixServer) {
+        module.restartKiwixServer();
+      }
+    });
+  });
 }, 1000);
 
 // Security middleware
