@@ -73,9 +73,10 @@ export default function StorageInfo() {
       <div style={{
         width: '150px',
         height: '8px',
-        background: 'var(--bg)',
+        background: 'rgba(0, 0, 0, 0.2)',
         borderRadius: '4px',
-        overflow: 'hidden'
+        overflow: 'hidden',
+        border: '1px solid var(--border)'
       }}>
         <div style={{
           width: `${percentUsed}%`,

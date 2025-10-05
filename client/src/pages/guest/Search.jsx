@@ -3,20 +3,30 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
 
 export default function GuestSearch() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const [query, setQuery] = useState(searchParams.get('q') || '');
   const [loading, setLoading] = useState(false);
   const [contentResults, setContentResults] = useState([]);
   const [zimResults, setZimResults] = useState([]);
+  const [availableLibraries, setAvailableLibraries] = useState([]);
+  const [selectedLibraries, setSelectedLibraries] = useState(new Set());
 
   useEffect(() => {
     const q = searchParams.get('q');
+    const filters = searchParams.get('filters');
+
     if (q) {
       setQuery(q);
+
+      // Parse filter selections from URL
+      if (filters) {
+        setSelectedLibraries(new Set(filters.split(',').filter(Boolean)));
+      }
+
       performSearch(q);
     }
-  }, [searchParams]);
+  }, [searchParams.get('q')]);
 
   const performSearch = async (searchQuery) => {
     if (!searchQuery || searchQuery.trim().length < 2) return;
@@ -31,7 +41,17 @@ export default function GuestSearch() {
       // Search within ZIM files
       const zimResponse = await fetch(`/api/zim/search?q=${encodeURIComponent(searchQuery)}`);
       const zimData = await zimResponse.json();
-      setZimResults(zimData.results || []);
+      const allZimResults = zimData.results || [];
+      setZimResults(allZimResults);
+
+      // Extract unique library types/categories
+      const libraries = [...new Set(allZimResults.map(r => r.zimCategory || r.zimTitle || 'Other'))];
+      setAvailableLibraries(libraries.sort());
+
+      // Initialize filters if none set - select all by default
+      if (selectedLibraries.size === 0 && libraries.length > 0) {
+        setSelectedLibraries(new Set(libraries));
+      }
     } catch (err) {
       console.error('Search failed:', err);
     } finally {
@@ -55,7 +75,32 @@ export default function GuestSearch() {
     navigate(`/zim-article?url=${encodeURIComponent(result.url)}&zimTitle=${encodeURIComponent(result.zimTitle)}`);
   };
 
-  const totalResults = contentResults.length + zimResults.length;
+  const toggleLibraryFilter = (library) => {
+    const newSelected = new Set(selectedLibraries);
+    if (newSelected.has(library)) {
+      newSelected.delete(library);
+    } else {
+      newSelected.add(library);
+    }
+    setSelectedLibraries(newSelected);
+
+    // Update URL with filters
+    const params = new URLSearchParams(searchParams);
+    if (newSelected.size > 0) {
+      params.set('filters', Array.from(newSelected).join(','));
+    } else {
+      params.delete('filters');
+    }
+    setSearchParams(params, { replace: true });
+  };
+
+  const filteredZimResults = zimResults.filter(result => {
+    if (selectedLibraries.size === 0) return true;
+    const category = result.zimCategory || result.zimTitle || 'Other';
+    return selectedLibraries.has(category);
+  });
+
+  const totalResults = contentResults.length + filteredZimResults.length;
 
   return (
     <div>
@@ -79,6 +124,36 @@ export default function GuestSearch() {
         </form>
       </div>
 
+      {/* Library Filters */}
+      {!loading && availableLibraries.length > 0 && (
+        <div className="card" style={{ marginBottom: '2rem', padding: '1rem' }}>
+          <div style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
+            Filter by Library:
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+            {availableLibraries.map(library => (
+              <button
+                key={library}
+                onClick={() => toggleLibraryFilter(library)}
+                style={{
+                  padding: '0.5rem 1rem',
+                  borderRadius: '20px',
+                  border: `2px solid ${selectedLibraries.has(library) ? 'var(--primary)' : 'var(--border)'}`,
+                  background: selectedLibraries.has(library) ? 'var(--primary)' : 'transparent',
+                  color: selectedLibraries.has(library) ? 'white' : 'var(--text)',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                  fontWeight: selectedLibraries.has(library) ? '600' : '400',
+                  transition: 'all 0.2s ease'
+                }}
+              >
+                {library}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {loading && (
         <div className="text-center" style={{ padding: '2rem' }}>
           <p>Searching...</p>
@@ -98,11 +173,11 @@ export default function GuestSearch() {
           </p>
 
           {/* ZIM Article Results */}
-          {zimResults.length > 0 && (
+          {filteredZimResults.length > 0 && (
             <div className="mb-4">
-              <h2 className="mb-2">From ZIM Libraries ({zimResults.length})</h2>
+              <h2 className="mb-2">From ZIM Libraries ({filteredZimResults.length})</h2>
               <div className="grid grid-1">
-                {zimResults.map((result, idx) => (
+                {filteredZimResults.map((result, idx) => (
                   <div
                     key={idx}
                     className="card"

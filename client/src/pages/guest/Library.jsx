@@ -14,7 +14,11 @@ export default function GuestLibrary() {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('libraries'); // 'libraries' or 'uploads'
   const [isAdmin, setIsAdmin] = useState(false);
-  const [viewAsGuest, setViewAsGuest] = useState(false);
+  const [viewAsGuest, setViewAsGuest] = useState(() => {
+    // Default to guest view (true)
+    const saved = localStorage.getItem('viewAsGuest');
+    return saved !== null ? saved === 'true' : true;
+  });
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -28,6 +32,13 @@ export default function GuestLibrary() {
         setIsAdmin(false);
       }
     }
+
+    // Listen for view mode changes from header
+    const handleViewModeChange = () => {
+      setViewAsGuest(localStorage.getItem('viewAsGuest') === 'true');
+    };
+    window.addEventListener('viewModeChanged', handleViewModeChange);
+    return () => window.removeEventListener('viewModeChanged', handleViewModeChange);
   }, []);
 
   useEffect(() => {
@@ -156,29 +167,6 @@ export default function GuestLibrary() {
         <p className="text-muted" style={{ fontSize: '1rem' }}>
           Your offline knowledge and media collection
         </p>
-
-        {/* Admin View Toggle */}
-        {isAdmin && (
-          <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem' }}>
-            <span style={{
-              fontSize: '0.875rem',
-              padding: '4px 12px',
-              borderRadius: '4px',
-              background: viewAsGuest ? 'var(--warning)' : 'var(--success)',
-              color: 'white',
-              fontWeight: 'bold'
-            }}>
-              {viewAsGuest ? '👁️ Guest View' : '🔧 Admin View'}
-            </span>
-            <button
-              onClick={() => setViewAsGuest(!viewAsGuest)}
-              className="btn btn-sm btn-secondary"
-              style={{ fontSize: '0.875rem' }}
-            >
-              Switch to {viewAsGuest ? 'Admin' : 'Guest'} View
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Search Box */}
