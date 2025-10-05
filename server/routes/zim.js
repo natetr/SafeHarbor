@@ -1044,8 +1044,8 @@ router.get('/update-settings', authenticateToken, requireAdmin, (req, res) => {
     if (!settings) {
       // Create default settings if they don't exist
       db.prepare(`
-        INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb)
-        VALUES (1, 24, 0, 5.0)
+        INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour)
+        VALUES (1, 24, 0, 5.0, 2, 6)
       `).run();
       settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
     }
@@ -1060,7 +1060,7 @@ router.get('/update-settings', authenticateToken, requireAdmin, (req, res) => {
 // Update ZIM update settings
 router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => {
   try {
-    const { check_interval_hours, auto_download_enabled, min_space_buffer_gb } = req.body;
+    const { check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour } = req.body;
 
     const updates = [];
     const params = [];
@@ -1076,6 +1076,14 @@ router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => 
     if (min_space_buffer_gb !== undefined) {
       updates.push('min_space_buffer_gb = ?');
       params.push(min_space_buffer_gb);
+    }
+    if (download_start_hour !== undefined) {
+      updates.push('download_start_hour = ?');
+      params.push(download_start_hour);
+    }
+    if (download_end_hour !== undefined) {
+      updates.push('download_end_hour = ?');
+      params.push(download_end_hour);
     }
 
     if (updates.length > 0) {

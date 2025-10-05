@@ -245,6 +245,25 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
   }
 }
 
+// Helper function to check if current time is within download window
+function isWithinDownloadWindow(settings) {
+  if (!settings) return true; // If no settings, allow downloads anytime
+
+  const now = new Date();
+  const currentHour = now.getHours();
+  const startHour = settings.download_start_hour || 0;
+  const endHour = settings.download_end_hour || 23;
+
+  // Handle time windows that cross midnight
+  if (startHour <= endHour) {
+    // Normal window: e.g., 2-6 (2am to 6am)
+    return currentHour >= startHour && currentHour < endHour;
+  } else {
+    // Window crosses midnight: e.g., 22-6 (10pm to 6am)
+    return currentHour >= startHour || currentHour < endHour;
+  }
+}
+
 // Main update check job
 async function runUpdateCheck(restartKiwixCallback) {
   try {
@@ -254,6 +273,14 @@ async function runUpdateCheck(restartKiwixCallback) {
 
     if (!settings || !settings.auto_download_enabled) {
       console.log('[Auto-Update] Auto-download is disabled. Checking for updates only.');
+    }
+
+    // Check if we're within the download time window
+    const withinWindow = isWithinDownloadWindow(settings);
+    if (settings && settings.auto_download_enabled && !withinWindow) {
+      const startHour = settings.download_start_hour || 0;
+      const endHour = settings.download_end_hour || 23;
+      console.log(`[Auto-Update] Outside download window (${startHour}:00-${endHour}:00). Will check for updates but not download.`);
     }
 
     // Get all ZIM libraries with auto-update enabled
@@ -273,10 +300,12 @@ async function runUpdateCheck(restartKiwixCallback) {
       if (updateInfo && updateInfo.updateAvailable) {
         console.log(`[Auto-Update] Update available for ${library.title}: ${updateInfo.currentVersion} -> ${updateInfo.latestVersion}`);
 
-        // If auto-download is enabled, download and install the update
-        if (settings && settings.auto_download_enabled) {
+        // If auto-download is enabled AND we're within the download window, download and install the update
+        if (settings && settings.auto_download_enabled && withinWindow) {
           console.log(`[Auto-Update] Auto-downloading update for ${library.title}...`);
           await downloadAndInstallUpdate(library, restartKiwixCallback);
+        } else if (settings && settings.auto_download_enabled && !withinWindow) {
+          console.log(`[Auto-Update] Update found but waiting for download window (${settings.download_start_hour}:00-${settings.download_end_hour}:00)`);
         }
       } else {
         console.log(`[Auto-Update] ${library.title} is up to date.`);

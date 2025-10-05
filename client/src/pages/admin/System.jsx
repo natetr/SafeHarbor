@@ -242,6 +242,51 @@ export default function AdminSystem() {
               </p>
             </div>
 
+            <div className="mb-3">
+              <label className="form-label">
+                <strong>Download time window (local time):</strong>
+              </label>
+              <p className="text-muted" style={{ fontSize: '0.875rem', marginBottom: '0.75rem' }}>
+                Set when automatic downloads should occur to avoid interfering with your internet use.
+                Updates will only download during this time period.
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span>From:</span>
+                  <select
+                    className="form-select"
+                    value={updateSettings.download_start_hour ?? 2}
+                    onChange={(e) => handleUpdateSettingsChange('download_start_hour', parseInt(e.target.value))}
+                    style={{ width: '120px' }}
+                  >
+                    {[...Array(24)].map((_, i) => (
+                      <option key={i} value={i}>
+                        {i.toString().padStart(2, '0')}:00
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span>To:</span>
+                  <select
+                    className="form-select"
+                    value={updateSettings.download_end_hour ?? 6}
+                    onChange={(e) => handleUpdateSettingsChange('download_end_hour', parseInt(e.target.value))}
+                    style={{ width: '120px' }}
+                  >
+                    {[...Array(24)].map((_, i) => (
+                      <option key={i} value={i}>
+                        {i.toString().padStart(2, '0')}:00
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
+                Default: 02:00 to 06:00 (2am to 6am). The time window can span across midnight (e.g., 22:00 to 06:00).
+              </p>
+            </div>
+
             <button
               onClick={handleSaveUpdateSettings}
               disabled={savingSettings}

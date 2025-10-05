@@ -89,6 +89,8 @@ export function initDatabase() {
       check_interval_hours INTEGER DEFAULT 24,
       auto_download_enabled BOOLEAN DEFAULT 0,
       min_space_buffer_gb REAL DEFAULT 5.0,
+      download_start_hour INTEGER DEFAULT 2,
+      download_end_hour INTEGER DEFAULT 6,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -242,9 +244,21 @@ export function initDatabase() {
   const updateSettings = db.prepare('SELECT id FROM zim_update_settings WHERE id = 1').get();
   if (!updateSettings) {
     db.prepare(`
-      INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb)
-      VALUES (1, 24, 0, 5.0)
+      INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour)
+      VALUES (1, 24, 0, 5.0, 2, 6)
     `).run();
+  }
+
+  // Add download time window columns to existing settings table if they don't exist
+  try {
+    db.exec(`ALTER TABLE zim_update_settings ADD COLUMN download_start_hour INTEGER DEFAULT 2`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_update_settings ADD COLUMN download_end_hour INTEGER DEFAULT 6`);
+  } catch (err) {
+    // Column already exists
   }
 
   console.log('Database initialized successfully');
