@@ -473,6 +473,71 @@ router.get('/download/progress', authenticateToken, requireAdmin, (req, res) => 
   }
 });
 
+// Get ZIM update settings (MUST come before /:id routes)
+router.get('/update-settings', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    let settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+
+    if (!settings) {
+      // Create default settings if they don't exist
+      db.prepare(`
+        INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour)
+        VALUES (1, 24, 0, 5.0, 2, 6)
+      `).run();
+      settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+    }
+
+    res.json(settings);
+  } catch (err) {
+    console.error('Error fetching update settings:', err);
+    res.status(500).json({ error: 'Failed to fetch update settings' });
+  }
+});
+
+// Update ZIM update settings (MUST come before /:id routes)
+router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour } = req.body;
+
+    const updates = [];
+    const params = [];
+
+    if (check_interval_hours !== undefined) {
+      updates.push('check_interval_hours = ?');
+      params.push(check_interval_hours);
+    }
+    if (auto_download_enabled !== undefined) {
+      updates.push('auto_download_enabled = ?');
+      params.push(auto_download_enabled ? 1 : 0);
+    }
+    if (min_space_buffer_gb !== undefined) {
+      updates.push('min_space_buffer_gb = ?');
+      params.push(min_space_buffer_gb);
+    }
+    if (download_start_hour !== undefined) {
+      updates.push('download_start_hour = ?');
+      params.push(download_start_hour);
+    }
+    if (download_end_hour !== undefined) {
+      updates.push('download_end_hour = ?');
+      params.push(download_end_hour);
+    }
+
+    if (updates.length > 0) {
+      updates.push('updated_at = ?');
+      params.push(new Date().toISOString());
+      params.push(1); // id = 1
+
+      db.prepare(`UPDATE zim_update_settings SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    }
+
+    res.json({ message: 'Update settings saved successfully' });
+  } catch (err) {
+    console.error('Update settings error:', err);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
 // Delete ZIM library
 router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
   try {
@@ -1033,71 +1098,6 @@ router.patch('/:id/auto-update', authenticateToken, requireAdmin, (req, res) => 
   } catch (err) {
     console.error('Auto-update toggle error:', err);
     res.status(500).json({ error: 'Failed to update auto-update setting' });
-  }
-});
-
-// Get ZIM update settings
-router.get('/update-settings', authenticateToken, requireAdmin, (req, res) => {
-  try {
-    let settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
-
-    if (!settings) {
-      // Create default settings if they don't exist
-      db.prepare(`
-        INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour)
-        VALUES (1, 24, 0, 5.0, 2, 6)
-      `).run();
-      settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
-    }
-
-    res.json(settings);
-  } catch (err) {
-    console.error('Error fetching update settings:', err);
-    res.status(500).json({ error: 'Failed to fetch update settings' });
-  }
-});
-
-// Update ZIM update settings
-router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => {
-  try {
-    const { check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour } = req.body;
-
-    const updates = [];
-    const params = [];
-
-    if (check_interval_hours !== undefined) {
-      updates.push('check_interval_hours = ?');
-      params.push(check_interval_hours);
-    }
-    if (auto_download_enabled !== undefined) {
-      updates.push('auto_download_enabled = ?');
-      params.push(auto_download_enabled ? 1 : 0);
-    }
-    if (min_space_buffer_gb !== undefined) {
-      updates.push('min_space_buffer_gb = ?');
-      params.push(min_space_buffer_gb);
-    }
-    if (download_start_hour !== undefined) {
-      updates.push('download_start_hour = ?');
-      params.push(download_start_hour);
-    }
-    if (download_end_hour !== undefined) {
-      updates.push('download_end_hour = ?');
-      params.push(download_end_hour);
-    }
-
-    if (updates.length > 0) {
-      updates.push('updated_at = ?');
-      params.push(new Date().toISOString());
-      params.push(1); // id = 1
-
-      db.prepare(`UPDATE zim_update_settings SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-    }
-
-    res.json({ message: 'Update settings saved successfully' });
-  } catch (err) {
-    console.error('Update settings error:', err);
-    res.status(500).json({ error: 'Failed to update settings' });
   }
 });
 
