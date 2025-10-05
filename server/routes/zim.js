@@ -768,9 +768,13 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
     });
 
     // Find matching entry with newer version
-    const matchingEntries = entries.filter(e =>
-      e.parsedName && parsed.name && e.parsedName.toLowerCase().includes(parsed.name.toLowerCase())
-    );
+    // Match if either name includes the other (flexible matching)
+    const matchingEntries = entries.filter(e => {
+      if (!e.parsedName || !parsed.name) return false;
+      const eName = e.parsedName.toLowerCase();
+      const pName = parsed.name.toLowerCase();
+      return eName.includes(pName) || pName.includes(eName);
+    });
 
     let updateAvailable = false;
     let latestEntry = null;
@@ -874,9 +878,12 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
           }
         });
 
-        const matchingEntries = entries.filter(e =>
-          e.parsedName && parsed.name && e.parsedName.toLowerCase().includes(parsed.name.toLowerCase())
-        );
+        const matchingEntries = entries.filter(e => {
+          if (!e.parsedName || !parsed.name) return false;
+          const eName = e.parsedName.toLowerCase();
+          const pName = parsed.name.toLowerCase();
+          return eName.includes(pName) || pName.includes(eName);
+        });
 
         let updateAvailable = false;
         let latestEntry = null;

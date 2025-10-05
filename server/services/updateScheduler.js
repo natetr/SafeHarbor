@@ -84,9 +84,12 @@ async function checkZimForUpdate(library) {
       }
     });
 
-    const matchingEntries = entries.filter(e =>
-      e.parsedName && parsed.name && e.parsedName.toLowerCase().includes(parsed.name.toLowerCase())
-    );
+    const matchingEntries = entries.filter(e => {
+      if (!e.parsedName || !parsed.name) return false;
+      const eName = e.parsedName.toLowerCase();
+      const pName = parsed.name.toLowerCase();
+      return eName.includes(pName) || pName.includes(eName);
+    });
 
     let updateAvailable = false;
     let latestEntry = null;
