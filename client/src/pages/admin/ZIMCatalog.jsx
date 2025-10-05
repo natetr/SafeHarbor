@@ -2,12 +2,15 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
 import StorageInfo from '../../components/StorageInfo';
+import Snackbar, { useSnackbar } from '../../components/Snackbar';
 
 export default function ZIMCatalog() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const showSnackbar = useSnackbar();
 
   const [catalog, setCatalog] = useState([]);
+  const [installedLibraries, setInstalledLibraries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [totalResults, setTotalResults] = useState(0);
   const [page, setPage] = useState(parseInt(searchParams.get('page')) || 1);
@@ -20,7 +23,7 @@ export default function ZIMCatalog() {
   const [sortDirection, setSortDirection] = useState(searchParams.get('dir') || 'asc');
   const itemsPerPage = 50;
 
-  // Fetch available languages on mount
+  // Fetch available languages and installed libraries on mount
   useEffect(() => {
     const fetchLanguages = async () => {
       try {
@@ -34,7 +37,22 @@ export default function ZIMCatalog() {
         console.error('Failed to fetch languages:', err);
       }
     };
+
+    const fetchInstalledLibraries = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/zim', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const data = await response.json();
+        setInstalledLibraries(data);
+      } catch (err) {
+        console.error('Failed to fetch installed libraries:', err);
+      }
+    };
+
     fetchLanguages();
+    fetchInstalledLibraries();
   }, []);
 
   // Reset to page 1 when filters change
@@ -124,11 +142,9 @@ export default function ZIMCatalog() {
 
   const handleDownload = async (item) => {
     if (!item.url) {
-      alert('No download URL available for this item');
+      showSnackbar('No download URL available for this item', 'error');
       return;
     }
-
-    if (!confirm(`Download ${item.title}?\n\nSize: ${formatSize(item.size)}\nArticles: ${item.articleCount?.toLocaleString() || 'N/A'}`)) return;
 
     try {
       const token = localStorage.getItem('token');
@@ -150,15 +166,57 @@ export default function ZIMCatalog() {
       });
 
       if (response.ok) {
-        alert('ZIM download started! Check the ZIM Libraries page to see progress.');
+        showSnackbar(`Download started: ${item.title}`, 'success');
+        // Refresh installed libraries list
+        const libs = await fetch('/api/zim', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        setInstalledLibraries(await libs.json());
       } else {
         const error = await response.json();
-        alert('Download failed: ' + (error.error || 'Unknown error'));
+        showSnackbar('Download failed: ' + (error.error || 'Unknown error'), 'error');
       }
     } catch (err) {
       console.error('Download failed:', err);
-      alert('Download failed: ' + err.message);
+      showSnackbar('Download failed: ' + err.message, 'error');
     }
+  };
+
+  const handleRemove = async (item) => {
+    const installed = installedLibraries.find(lib =>
+      lib.title === item.title || lib.filename?.includes(item.name)
+    );
+
+    if (!installed) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/zim/${installed.id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        showSnackbar(`Removed: ${item.title}`, 'success');
+        // Refresh installed libraries list
+        const libs = await fetch('/api/zim', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        setInstalledLibraries(await libs.json());
+      } else {
+        const error = await response.json();
+        showSnackbar('Remove failed: ' + (error.error || 'Unknown error'), 'error');
+      }
+    } catch (err) {
+      console.error('Remove failed:', err);
+      showSnackbar('Remove failed: ' + err.message, 'error');
+    }
+  };
+
+  const isInstalled = (item) => {
+    return installedLibraries.some(lib =>
+      lib.title === item.title || lib.filename?.includes(item.name)
+    );
   };
 
   const handleVisit = (item) => {
@@ -273,68 +331,98 @@ export default function ZIMCatalog() {
 
       {/* Catalog Grid */}
       <div className="grid grid-3">
-        {catalog.map((item, idx) => (
-          <div key={idx} className="card" style={{ display: 'flex', flexDirection: 'column' }}>
-            {/* Icon/Logo */}
-            {item.icon && (
-              <img
-                src={`https://library.kiwix.org${item.icon}`}
-                alt={item.title}
-                style={{
-                  width: '48px',
-                  height: '48px',
-                  marginBottom: '0.75rem',
-                  objectFit: 'contain'
-                }}
-                onError={(e) => { e.target.style.display = 'none'; }}
-              />
-            )}
+        {catalog.map((item, idx) => {
+          const installed = isInstalled(item);
+          return (
+            <div key={idx} className="card" style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
+              {/* Installed Badge */}
+              {installed && (
+                <div style={{
+                  position: 'absolute',
+                  top: '0.5rem',
+                  right: '0.5rem',
+                  background: 'var(--success)',
+                  color: 'white',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  fontSize: '0.7rem',
+                  fontWeight: 'bold'
+                }}>
+                  INSTALLED
+                </div>
+              )}
 
-            <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>{decodeHtml(item.title)}</h3>
+              {/* Icon/Logo */}
+              {item.icon && (
+                <img
+                  src={`https://library.kiwix.org${item.icon}`}
+                  alt={item.title}
+                  style={{
+                    width: '48px',
+                    height: '48px',
+                    marginBottom: '0.75rem',
+                    objectFit: 'contain'
+                  }}
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+              )}
 
-            {item.category && (
-              <span style={{
-                display: 'inline-block',
-                background: 'var(--primary)',
-                color: 'white',
-                padding: '2px 8px',
-                borderRadius: '4px',
-                fontSize: '0.75rem',
-                marginBottom: '0.5rem',
-                alignSelf: 'flex-start'
-              }}>
-                {item.category}
-              </span>
-            )}
+              <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>{decodeHtml(item.title)}</h3>
 
-            <p className="text-muted" style={{ fontSize: '0.875rem', marginBottom: '0.75rem', flex: 1 }}>
-              {decodeHtml(item.description || '')?.substring(0, 150)}{item.description && item.description.length > 150 ? '...' : ''}
-            </p>
+              {item.category && (
+                <span style={{
+                  display: 'inline-block',
+                  background: 'var(--primary)',
+                  color: 'white',
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  fontSize: '0.75rem',
+                  marginBottom: '0.5rem',
+                  alignSelf: 'flex-start'
+                }}>
+                  {item.category}
+                </span>
+              )}
 
-            <div style={{ fontSize: '0.875rem', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
-              <div><strong>Size:</strong> {formatSize(item.size)}</div>
-              <div><strong>Articles:</strong> {item.articleCount?.toLocaleString() || 'N/A'}</div>
-              {item.language && <div><strong>Language:</strong> {item.language.split(',')[0].toUpperCase()}</div>}
+              <p className="text-muted" style={{ fontSize: '0.875rem', marginBottom: '0.75rem', flex: 1 }}>
+                {decodeHtml(item.description || '')?.substring(0, 150)}{item.description && item.description.length > 150 ? '...' : ''}
+              </p>
+
+              <div style={{ fontSize: '0.875rem', marginBottom: '0.75rem', color: 'var(--text-muted)' }}>
+                <div><strong>Size:</strong> {formatSize(item.size)}</div>
+                <div><strong>Articles:</strong> {item.articleCount?.toLocaleString() || 'N/A'}</div>
+                {item.language && <div><strong>Language:</strong> {item.language.split(',')[0].toUpperCase()}</div>}
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem', marginTop: 'auto' }}>
+                <button
+                  onClick={() => handleVisit(item)}
+                  className="btn btn-sm btn-secondary"
+                  style={{ flex: 1 }}
+                >
+                  Preview
+                </button>
+                {installed ? (
+                  <button
+                    onClick={() => handleRemove(item)}
+                    className="btn btn-sm btn-danger"
+                    style={{ flex: 1 }}
+                  >
+                    Remove
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => handleDownload(item)}
+                    className="btn btn-sm btn-primary"
+                    style={{ flex: 1 }}
+                  >
+                    Download
+                  </button>
+                )}
+              </div>
             </div>
-
-            <div style={{ display: 'flex', gap: '0.5rem', marginTop: 'auto' }}>
-              <button
-                onClick={() => handleVisit(item)}
-                className="btn btn-sm btn-secondary"
-                style={{ flex: 1 }}
-              >
-                Preview
-              </button>
-              <button
-                onClick={() => handleDownload(item)}
-                className="btn btn-sm btn-primary"
-                style={{ flex: 1 }}
-              >
-                Download
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Loading indicator */}
@@ -383,6 +471,8 @@ export default function ZIMCatalog() {
           <p className="text-muted">No ZIMs found matching your criteria</p>
         </div>
       )}
+
+      <Snackbar />
     </div>
   );
 }

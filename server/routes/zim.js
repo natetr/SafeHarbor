@@ -71,11 +71,20 @@ function startKiwixServer() {
 
 // Restart Kiwix server
 function restartKiwixServer() {
+  // Kill the kiwixProcess if we have a reference
   if (kiwixProcess) {
     kiwixProcess.kill();
     kiwixProcess = null;
   }
-  setTimeout(startKiwixServer, 1000);
+
+  // Also kill any orphaned kiwix-serve processes (in case Node server restarted)
+  try {
+    spawn('pkill', ['-f', 'kiwix-serve']);
+  } catch (err) {
+    // Ignore errors if no process found
+  }
+
+  setTimeout(startKiwixServer, 2000);
 }
 
 // Get all ZIM libraries
