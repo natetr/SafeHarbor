@@ -161,7 +161,8 @@ export default function ZIMCatalog() {
           language: item.language,
           size: item.size,
           articleCount: item.articleCount,
-          mediaCount: item.mediaCount
+          mediaCount: item.mediaCount,
+          updated: item.updated
         })
       });
 
