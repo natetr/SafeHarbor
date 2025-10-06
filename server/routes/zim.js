@@ -809,10 +809,17 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
     let url = `https://library.kiwix.org/catalog/v2/entries?count=100`;
     if (parsed.name) {
       // For domain-based names (e.g., pets.stackexchange.com_en_all), search for just the domain
+      // For DevDocs (e.g., devdocs_en_redux), search for the last part (topic name)
       // For other names (e.g., wikipedia_ace_all_nopic), search for first two parts
-      const searchTerm = parsed.name.includes('.')
-        ? parsed.name.split('_')[0].split('.')[0] // "pets" from "pets.stackexchange.com_en_all"
-        : parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+      let searchTerm;
+      if (parsed.name.includes('.')) {
+        searchTerm = parsed.name.split('_')[0].split('.')[0]; // "pets" from "pets.stackexchange.com_en_all"
+      } else if (parsed.name.startsWith('devdocs_')) {
+        const parts = parsed.name.split('_');
+        searchTerm = parts.length > 2 ? parts.slice(2).join(' ') : parsed.name; // "redux" from "devdocs_en_redux"
+      } else {
+        searchTerm = parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+      }
       url += `&q=${encodeURIComponent(searchTerm)}`;
     }
 
@@ -958,10 +965,17 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
         let url = `https://library.kiwix.org/catalog/v2/entries?count=100`;
         if (parsed.name) {
           // For domain-based names (e.g., pets.stackexchange.com_en_all), search for just the domain
+          // For DevDocs (e.g., devdocs_en_redux), search for the last part (topic name)
           // For other names (e.g., wikipedia_ace_all_nopic), search for first two parts
-          const searchTerm = parsed.name.includes('.')
-            ? parsed.name.split('_')[0].split('.')[0] // "pets" from "pets.stackexchange.com_en_all"
-            : parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+          let searchTerm;
+          if (parsed.name.includes('.')) {
+            searchTerm = parsed.name.split('_')[0].split('.')[0]; // "pets" from "pets.stackexchange.com_en_all"
+          } else if (parsed.name.startsWith('devdocs_')) {
+            const parts = parsed.name.split('_');
+            searchTerm = parts.length > 2 ? parts.slice(2).join(' ') : parsed.name; // "redux" from "devdocs_en_redux"
+          } else {
+            searchTerm = parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+          }
           url += `&q=${encodeURIComponent(searchTerm)}`;
         }
 
