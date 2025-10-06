@@ -49,6 +49,32 @@ async function checkDiskSpace() {
   }
 }
 
+// Helper function to log ZIM activities
+function logZimActivity(action, options = {}) {
+  try {
+    const {
+      zimTitle = null,
+      zimFilename = null,
+      zimId = null,
+      details = null,
+      userId = null,
+      status = 'success',
+      errorMessage = null,
+      fileSize = null,
+      downloadDuration = null
+    } = options;
+
+    db.prepare(`
+      INSERT INTO zim_logs (action, zim_title, zim_filename, zim_id, details, user_id, status, error_message, file_size, download_duration)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(action, zimTitle, zimFilename, zimId, details, userId, status, errorMessage, fileSize, downloadDuration);
+
+    console.log(`[ZIM LOG] ${action}: ${zimTitle || zimFilename || 'N/A'} - ${status}`);
+  } catch (err) {
+    console.error('Failed to log ZIM activity:', err);
+  }
+}
+
 // Start Kiwix server
 function startKiwixServer() {
   if (kiwixProcess) {
@@ -354,7 +380,17 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       progress: 0,
       totalSize: size || 0, // Use size from catalog
       downloadedSize: 0,
-      status: 'starting'
+      status: 'starting',
+      startTime: Date.now()
+    });
+
+    // Log download start
+    logZimActivity('download_started', {
+      zimTitle: title || filename,
+      zimFilename: filename,
+      details: `URL: ${url}, Size: ${size ? (size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
+      userId: req.user?.id,
+      status: 'in_progress'
     });
 
     // Start download in background
@@ -392,6 +428,8 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
     response.data.pipe(writer);
 
     writer.on('finish', async () => {
+      const download = activeDownloads.get(filename);
+      const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
       activeDownloads.delete(filename);
 
       // Get file size from filesystem
@@ -404,7 +442,7 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       }
 
       // Add to database
-      db.prepare(`
+      const result = db.prepare(`
         INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
@@ -420,6 +458,18 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
         updated || null
       );
 
+      // Log download completion
+      logZimActivity('download_completed', {
+        zimTitle: title || filename,
+        zimFilename: filename,
+        zimId: result.lastInsertRowid,
+        details: `Language: ${language || 'Unknown'}, Articles: ${articleCount?.toLocaleString() || 'N/A'}`,
+        userId: req.user?.id,
+        status: 'success',
+        fileSize: fileSize,
+        downloadDuration: downloadDuration
+      });
+
       // Restart Kiwix server to include new file
       restartKiwixServer();
 
@@ -428,7 +478,21 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
 
     writer.on('error', (err) => {
       console.error('Download error:', err);
+      const download = activeDownloads.get(filename);
+      const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
       activeDownloads.delete(filename);
+
+      // Log download failure
+      logZimActivity('download_failed', {
+        zimTitle: title || filename,
+        zimFilename: filename,
+        details: `URL: ${url}`,
+        userId: req.user?.id,
+        status: 'failed',
+        errorMessage: err.message,
+        downloadDuration: downloadDuration
+      });
+
       if (fs.existsSync(filepath)) {
         fs.unlinkSync(filepath);
       }
@@ -559,6 +623,16 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
 
     // Delete from database
     db.prepare('DELETE FROM zim_libraries WHERE id = ?').run(req.params.id);
+
+    // Log deletion
+    logZimActivity('zim_deleted', {
+      zimTitle: library.title,
+      zimFilename: library.filename,
+      zimId: library.id,
+      details: `Size: ${library.size ? (library.size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
+      userId: req.user?.id,
+      status: 'success'
+    });
 
     // Restart Kiwix server
     restartKiwixServer();
@@ -1063,7 +1137,18 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
       downloadedSize: 0,
       status: 'starting',
       isUpdate: true,
-      originalId: library.id
+      originalId: library.id,
+      startTime: Date.now()
+    });
+
+    // Log update start
+    logZimActivity('update_started', {
+      zimTitle: library.title,
+      zimFilename: library.filename,
+      zimId: library.id,
+      details: `From: ${library.filename} → To: ${newFilename}, Size: ${library.available_update_size ? (library.available_update_size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
+      userId: req.user?.id,
+      status: 'in_progress'
     });
 
     res.json({
@@ -1097,6 +1182,8 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
 
     writer.on('finish', async () => {
       try {
+        const download = activeDownloads.get(newFilename);
+        const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
         activeDownloads.delete(newFilename);
 
         // Backup old file
@@ -1121,6 +1208,18 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
         `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.available_update_date,
                library.available_update_article_count, library.available_update_media_count, library.id);
 
+        // Log update completion
+        logZimActivity('update_completed', {
+          zimTitle: library.title,
+          zimFilename: newFilename,
+          zimId: library.id,
+          details: `Updated from ${library.filename} to ${newFilename}. Articles: ${library.available_update_article_count?.toLocaleString() || 'N/A'}`,
+          userId: req.user?.id,
+          status: 'success',
+          fileSize: stats.size,
+          downloadDuration: downloadDuration
+        });
+
         // Restart Kiwix server
         restartKiwixServer();
 
@@ -1128,12 +1227,33 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
         setTimeout(() => {
           if (fs.existsSync(backupFilepath)) {
             fs.unlinkSync(backupFilepath);
+            // Log backup deletion
+            logZimActivity('backup_deleted', {
+              zimTitle: library.title,
+              zimFilename: library.filename,
+              zimId: library.id,
+              details: `Deleted backup file: ${path.basename(backupFilepath)}`,
+              userId: req.user?.id,
+              status: 'success'
+            });
           }
         }, 5000);
 
         console.log(`ZIM update complete: ${library.title} -> ${newFilename}`);
       } catch (err) {
         console.error('Update finalization error:', err);
+
+        // Log update failure
+        logZimActivity('update_failed', {
+          zimTitle: library.title,
+          zimFilename: library.filename,
+          zimId: library.id,
+          details: `Failed to finalize update to ${newFilename}`,
+          userId: req.user?.id,
+          status: 'failed',
+          errorMessage: err.message
+        });
+
         // Rollback: restore backup if it exists
         if (fs.existsSync(backupFilepath)) {
           if (fs.existsSync(finalFilepath)) {
@@ -1147,7 +1267,22 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
 
     writer.on('error', (err) => {
       console.error('Update download error:', err);
+      const download = activeDownloads.get(newFilename);
+      const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
       activeDownloads.delete(newFilename);
+
+      // Log update download failure
+      logZimActivity('update_failed', {
+        zimTitle: library.title,
+        zimFilename: library.filename,
+        zimId: library.id,
+        details: `Update download failed for ${newFilename}`,
+        userId: req.user?.id,
+        status: 'failed',
+        errorMessage: err.message,
+        downloadDuration: downloadDuration
+      });
+
       if (fs.existsSync(tempFilepath)) {
         fs.unlinkSync(tempFilepath);
       }
@@ -1176,6 +1311,105 @@ router.patch('/:id/auto-update', authenticateToken, requireAdmin, (req, res) => 
   } catch (err) {
     console.error('Auto-update toggle error:', err);
     res.status(500).json({ error: 'Failed to update auto-update setting' });
+  }
+});
+
+// Get ZIM activity logs
+router.get('/logs', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { action, status, limit = 100, offset = 0 } = req.query;
+
+    let query = `
+      SELECT
+        zl.*,
+        u.username
+      FROM zim_logs zl
+      LEFT JOIN users u ON zl.user_id = u.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (action) {
+      query += ' AND zl.action = ?';
+      params.push(action);
+    }
+
+    if (status) {
+      query += ' AND zl.status = ?';
+      params.push(status);
+    }
+
+    query += ' ORDER BY zl.created_at DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), parseInt(offset));
+
+    const logs = db.prepare(query).all(...params);
+
+    // Get total count for pagination
+    let countQuery = 'SELECT COUNT(*) as total FROM zim_logs WHERE 1=1';
+    const countParams = [];
+
+    if (action) {
+      countQuery += ' AND action = ?';
+      countParams.push(action);
+    }
+
+    if (status) {
+      countQuery += ' AND status = ?';
+      countParams.push(status);
+    }
+
+    const { total } = db.prepare(countQuery).get(...countParams);
+
+    res.json({
+      logs,
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+  } catch (err) {
+    console.error('Error fetching ZIM logs:', err);
+    res.status(500).json({ error: 'Failed to fetch ZIM logs' });
+  }
+});
+
+// Get ZIM activity log statistics
+router.get('/logs/stats', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const stats = {
+      totalActions: db.prepare('SELECT COUNT(*) as count FROM zim_logs').get().count,
+      byAction: db.prepare(`
+        SELECT action, COUNT(*) as count
+        FROM zim_logs
+        GROUP BY action
+        ORDER BY count DESC
+      `).all(),
+      byStatus: db.prepare(`
+        SELECT status, COUNT(*) as count
+        FROM zim_logs
+        GROUP BY status
+      `).all(),
+      recentErrors: db.prepare(`
+        SELECT * FROM zim_logs
+        WHERE status = 'failed'
+        ORDER BY created_at DESC
+        LIMIT 10
+      `).all(),
+      totalDownloadSize: db.prepare(`
+        SELECT SUM(file_size) as total
+        FROM zim_logs
+        WHERE action = 'download_completed'
+      `).get().total || 0,
+      avgDownloadDuration: db.prepare(`
+        SELECT AVG(download_duration) as avg
+        FROM zim_logs
+        WHERE download_duration IS NOT NULL
+      `).get().avg || 0
+    };
+
+    res.json(stats);
+  } catch (err) {
+    console.error('Error fetching ZIM log stats:', err);
+    res.status(500).json({ error: 'Failed to fetch ZIM log statistics' });
   }
 });
 

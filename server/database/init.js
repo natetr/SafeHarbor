@@ -153,6 +153,26 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // ZIM activity logs table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zim_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      zim_title TEXT,
+      zim_filename TEXT,
+      zim_id INTEGER,
+      details TEXT,
+      user_id INTEGER,
+      status TEXT DEFAULT 'success',
+      error_message TEXT,
+      file_size INTEGER,
+      download_duration INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (zim_id) REFERENCES zim_libraries(id) ON DELETE SET NULL
+    )
+  `);
+
   // Network configuration table
   db.exec(`
     CREATE TABLE IF NOT EXISTS network_config (

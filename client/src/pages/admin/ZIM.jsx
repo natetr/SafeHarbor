@@ -295,7 +295,15 @@ export default function AdminZIM() {
 
   return (
     <div>
-      <h1 className="mb-3">ZIM Libraries</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <h1 style={{ margin: 0 }}>ZIM Libraries</h1>
+        <button
+          onClick={() => window.location.href = '/admin/zim/logs'}
+          className="btn btn-secondary"
+        >
+          📋 View Activity Logs
+        </button>
+      </div>
 
       <StorageInfo />
 

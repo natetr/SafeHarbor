@@ -38,6 +38,31 @@ async function checkDiskSpace() {
   }
 }
 
+// Helper function to log ZIM activities (auto-update actions)
+function logZimActivity(action, options = {}) {
+  try {
+    const {
+      zimTitle = null,
+      zimFilename = null,
+      zimId = null,
+      details = null,
+      status = 'success',
+      errorMessage = null,
+      fileSize = null,
+      downloadDuration = null
+    } = options;
+
+    db.prepare(`
+      INSERT INTO zim_logs (action, zim_title, zim_filename, zim_id, details, user_id, status, error_message, file_size, download_duration)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+    `).run(action, zimTitle, zimFilename, zimId, details, status, errorMessage, fileSize, downloadDuration);
+
+    console.log(`[AUTO-UPDATE LOG] ${action}: ${zimTitle || zimFilename || 'N/A'} - ${status}`);
+  } catch (err) {
+    console.error('Failed to log ZIM activity:', err);
+  }
+}
+
 // Check for updates for a specific ZIM
 async function checkZimForUpdate(library) {
   try {
@@ -195,6 +220,17 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
 
     console.log(`Starting auto-update for ${library.title} (${library.filename} -> ${newFilename})`);
 
+    const startTime = Date.now();
+
+    // Log auto-update start
+    logZimActivity('auto_update_started', {
+      zimTitle: library.title,
+      zimFilename: library.filename,
+      zimId: library.id,
+      details: `Auto-updating from ${library.filename} to ${newFilename}. Size: ${library.available_update_size ? (library.available_update_size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
+      status: 'in_progress'
+    });
+
     // Download file
     const writer = fs.createWriteStream(tempFilepath);
     const response = await axios({
@@ -209,6 +245,8 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
     return new Promise((resolve, reject) => {
       writer.on('finish', async () => {
         try {
+          const downloadDuration = Math.round((Date.now() - startTime) / 1000);
+
           // Backup old file
           if (fs.existsSync(library.filepath)) {
             fs.renameSync(library.filepath, backupFilepath);
@@ -231,6 +269,17 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
           `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.available_update_date,
                  library.available_update_article_count, library.available_update_media_count, library.id);
 
+          // Log auto-update completion
+          logZimActivity('auto_update_completed', {
+            zimTitle: library.title,
+            zimFilename: newFilename,
+            zimId: library.id,
+            details: `Auto-updated from ${library.filename} to ${newFilename}. Articles: ${library.available_update_article_count?.toLocaleString() || 'N/A'}`,
+            status: 'success',
+            fileSize: stats.size,
+            downloadDuration: downloadDuration
+          });
+
           // Restart Kiwix server
           if (restartKiwixCallback) {
             restartKiwixCallback();
@@ -240,6 +289,14 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
           setTimeout(() => {
             if (fs.existsSync(backupFilepath)) {
               fs.unlinkSync(backupFilepath);
+              // Log backup deletion
+              logZimActivity('backup_deleted', {
+                zimTitle: library.title,
+                zimFilename: library.filename,
+                zimId: library.id,
+                details: `Auto-update: Deleted backup file ${path.basename(backupFilepath)}`,
+                status: 'success'
+              });
             }
           }, 5000);
 
@@ -247,6 +304,16 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
           resolve(true);
         } catch (err) {
           console.error('Update finalization error:', err);
+
+          // Log auto-update failure
+          logZimActivity('auto_update_failed', {
+            zimTitle: library.title,
+            zimFilename: library.filename,
+            zimId: library.id,
+            details: `Failed to finalize auto-update to ${newFilename}`,
+            status: 'failed',
+            errorMessage: err.message
+          });
           // Rollback: restore backup if it exists
           if (fs.existsSync(backupFilepath)) {
             if (fs.existsSync(finalFilepath)) {
@@ -263,6 +330,19 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
 
       writer.on('error', (err) => {
         console.error('Update download error:', err);
+        const downloadDuration = Math.round((Date.now() - startTime) / 1000);
+
+        // Log auto-update download failure
+        logZimActivity('auto_update_failed', {
+          zimTitle: library.title,
+          zimFilename: library.filename,
+          zimId: library.id,
+          details: `Auto-update download failed for ${newFilename}`,
+          status: 'failed',
+          errorMessage: err.message,
+          downloadDuration: downloadDuration
+        });
+
         if (fs.existsSync(tempFilepath)) {
           fs.unlinkSync(tempFilepath);
         }
