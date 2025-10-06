@@ -616,6 +616,16 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
       return res.status(404).json({ error: 'ZIM library not found' });
     }
 
+    // Log deletion BEFORE deleting from database (so foreign key is still valid)
+    logZimActivity('zim_deleted', {
+      zimTitle: library.title,
+      zimFilename: library.filename,
+      zimId: library.id,
+      details: `Size: ${library.size ? (library.size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}, Language: ${library.language || 'Unknown'}`,
+      userId: req.user?.id,
+      status: 'success'
+    });
+
     // Delete file from filesystem
     if (fs.existsSync(library.filepath)) {
       fs.unlinkSync(library.filepath);
@@ -624,22 +634,27 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
     // Delete from database
     db.prepare('DELETE FROM zim_libraries WHERE id = ?').run(req.params.id);
 
-    // Log deletion
-    logZimActivity('zim_deleted', {
-      zimTitle: library.title,
-      zimFilename: library.filename,
-      zimId: library.id,
-      details: `Size: ${library.size ? (library.size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
-      userId: req.user?.id,
-      status: 'success'
-    });
-
     // Restart Kiwix server
     restartKiwixServer();
 
     res.json({ message: 'ZIM library deleted successfully' });
   } catch (err) {
     console.error('Delete error:', err);
+
+    // Log deletion failure
+    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+    if (library) {
+      logZimActivity('zim_delete_failed', {
+        zimTitle: library.title,
+        zimFilename: library.filename,
+        zimId: library.id,
+        details: `Failed to delete ZIM`,
+        userId: req.user?.id,
+        status: 'failed',
+        errorMessage: err.message
+      });
+    }
+
     res.status(500).json({ error: 'Failed to delete ZIM library' });
   }
 });
@@ -656,23 +671,37 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
 
     const updates = [];
     const params = [];
+    const changes = [];
 
     if (title !== undefined) {
       updates.push('title = ?');
       params.push(title);
+      changes.push(`title: "${library.title}" → "${title}"`);
     }
     if (description !== undefined) {
       updates.push('description = ?');
       params.push(description);
+      changes.push(`description updated`);
     }
     if (hidden !== undefined) {
       updates.push('hidden = ?');
       params.push(hidden ? 1 : 0);
+      changes.push(`visibility: ${hidden ? 'hidden' : 'visible'}`);
     }
 
     if (updates.length > 0) {
       params.push(req.params.id);
       db.prepare(`UPDATE zim_libraries SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+
+      // Log metadata update
+      logZimActivity('metadata_updated', {
+        zimTitle: library.title,
+        zimFilename: library.filename,
+        zimId: library.id,
+        details: changes.join(', '),
+        userId: req.user?.id,
+        status: 'success'
+      });
     }
 
     res.json({ message: 'ZIM library updated successfully' });
@@ -1318,8 +1347,23 @@ router.patch('/:id/auto-update', authenticateToken, requireAdmin, (req, res) => 
       return res.status(400).json({ error: 'enabled must be a boolean' });
     }
 
+    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+    if (!library) {
+      return res.status(404).json({ error: 'ZIM library not found' });
+    }
+
     db.prepare('UPDATE zim_libraries SET auto_update_enabled = ? WHERE id = ?')
       .run(enabled ? 1 : 0, req.params.id);
+
+    // Log auto-update toggle
+    logZimActivity('auto_update_toggled', {
+      zimTitle: library.title,
+      zimFilename: library.filename,
+      zimId: library.id,
+      details: `Auto-update ${enabled ? 'enabled' : 'disabled'}`,
+      userId: req.user?.id,
+      status: 'success'
+    });
 
     res.json({ message: 'Auto-update setting updated', enabled });
   } catch (err) {

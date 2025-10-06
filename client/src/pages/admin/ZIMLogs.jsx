@@ -63,10 +63,16 @@ export default function ZIMLogs() {
       'update_started': 'Update Started',
       'update_completed': 'Update Completed',
       'update_failed': 'Update Failed',
+      'auto_update_started': 'Auto-Update Started',
+      'auto_update_completed': 'Auto-Update Completed',
+      'auto_update_failed': 'Auto-Update Failed',
       'zim_deleted': 'ZIM Deleted',
-      'backup_deleted': 'Backup Deleted'
+      'zim_delete_failed': 'Delete Failed',
+      'backup_deleted': 'Backup Deleted',
+      'metadata_updated': 'Metadata Updated',
+      'auto_update_toggled': 'Auto-Update Toggled'
     };
-    return labels[action] || action;
+    return labels[action] || action.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   };
 
   const getActionColor = (action) => {
@@ -74,6 +80,7 @@ export default function ZIMLogs() {
     if (action.includes('completed')) return 'var(--success)';
     if (action.includes('started')) return 'var(--primary)';
     if (action.includes('deleted')) return 'var(--warning)';
+    if (action.includes('toggled') || action.includes('metadata')) return 'var(--info, #17a2b8)';
     return 'var(--text-muted)';
   };
 
