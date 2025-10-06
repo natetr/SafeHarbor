@@ -43,9 +43,16 @@ async function checkZimForUpdate(library) {
   try {
     const parsed = parseZimFilename(library.filename);
 
-    let url = `https://library.kiwix.org/catalog/v2/entries?count=50`;
+    // Query Kiwix catalog - use catalog name tag for better matching
+    // The catalog <name> tag usually matches our parsed name (without version)
+    let url = `https://library.kiwix.org/catalog/v2/entries?count=100`;
     if (parsed.name) {
-      url += `&q=${encodeURIComponent(parsed.name)}`;
+      // For domain-based names (e.g., pets.stackexchange.com_en_all), search for just the domain
+      // For other names (e.g., wikipedia_ace_all_nopic), search for first two parts
+      const searchTerm = parsed.name.includes('.')
+        ? parsed.name.split('_')[0].split('.')[0] // "pets" from "pets.stackexchange.com_en_all"
+        : parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+      url += `&q=${encodeURIComponent(searchTerm)}`;
     }
 
     const response = await axios.get(url, { timeout: 15000 });
@@ -79,23 +86,39 @@ async function checkZimForUpdate(library) {
           size: size,
           filename: filename,
           parsedName: parsedEntry.name,
-          version: parsedEntry.version
+          version: parsedEntry.version,
+          updated: getTag('updated'),
+          articleCount: parseInt(getTag('articleCount')) || null,
+          mediaCount: parseInt(getTag('mediaCount')) || null
         });
       }
     });
 
+    // Find matching entry - match by filename similarity
+    const libraryBase = library.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
     const matchingEntries = entries.filter(e => {
-      if (!e.parsedName || !parsed.name) return false;
-      const eName = e.parsedName.toLowerCase();
-      const pName = parsed.name.toLowerCase();
-      return eName.includes(pName) || pName.includes(eName);
+      if (!e.filename) return false;
+      const catalogBase = e.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
+      // Exact match on base filename (with underscores converted to hyphens)
+      return catalogBase === libraryBase;
     });
 
     let updateAvailable = false;
     let latestEntry = null;
 
     for (const entry of matchingEntries) {
-      if (entry.version && parsed.version) {
+      // Prefer date comparison if both have updated dates
+      if (entry.updated && library.updated_date) {
+        const entryDate = new Date(entry.updated);
+        const libraryDate = new Date(library.updated_date);
+        if (entryDate > libraryDate) {
+          if (!latestEntry || new Date(entry.updated) > new Date(latestEntry.updated)) {
+            latestEntry = entry;
+            updateAvailable = true;
+          }
+        }
+      } else if (entry.version && parsed.version) {
+        // Fallback to version comparison from filename
         if (entry.version > parsed.version) {
           if (!latestEntry || entry.version > latestEntry.version) {
             latestEntry = entry;
@@ -109,9 +132,10 @@ async function checkZimForUpdate(library) {
     if (updateAvailable && latestEntry) {
       db.prepare(`
         UPDATE zim_libraries
-        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?
+        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
+            available_update_article_count = ?, available_update_media_count = ?
         WHERE id = ?
-      `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, library.id);
+      `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, library.id);
 
       return {
         id: library.id,
@@ -124,7 +148,8 @@ async function checkZimForUpdate(library) {
     } else {
       db.prepare(`
         UPDATE zim_libraries
-        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL
+        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
+            available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
         WHERE id = ?
       `).run(now, library.id);
 
@@ -199,10 +224,12 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
           db.prepare(`
             UPDATE zim_libraries
             SET filename = ?, filepath = ?, size = ?,
-                available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
-                url = ?
+                available_update_url = NULL, available_update_version = NULL, available_update_size = NULL, available_update_date = NULL,
+                available_update_article_count = NULL, available_update_media_count = NULL,
+                url = ?, updated_date = ?, article_count = ?, media_count = ?
             WHERE id = ?
-          `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.id);
+          `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.available_update_date,
+                 library.available_update_article_count, library.available_update_media_count, library.id);
 
           // Restart Kiwix server
           if (restartKiwixCallback) {

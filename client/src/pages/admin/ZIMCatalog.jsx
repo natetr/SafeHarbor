@@ -183,9 +183,17 @@ export default function ZIMCatalog() {
   };
 
   const handleRemove = async (item) => {
-    const installed = installedLibraries.find(lib =>
-      lib.title === item.title || lib.filename?.includes(item.name)
-    );
+    const installed = installedLibraries.find(lib => {
+      // Match by name if available (most reliable)
+      if (item.name && lib.filename?.includes(item.name)) {
+        return true;
+      }
+      // Match by both title AND language for exact match
+      if (item.title && item.language && lib.title === item.title && lib.language === item.language) {
+        return true;
+      }
+      return false;
+    });
 
     if (!installed) return;
 
@@ -214,9 +222,17 @@ export default function ZIMCatalog() {
   };
 
   const isInstalled = (item) => {
-    return installedLibraries.some(lib =>
-      lib.title === item.title || lib.filename?.includes(item.name)
-    );
+    return installedLibraries.some(lib => {
+      // Match by name if available (most reliable)
+      if (item.name && lib.filename?.includes(item.name)) {
+        return true;
+      }
+      // Match by both title AND language for exact match
+      if (item.title && item.language && lib.title === item.title && lib.language === item.language) {
+        return true;
+      }
+      return false;
+    });
   };
 
   const handleVisit = (item) => {

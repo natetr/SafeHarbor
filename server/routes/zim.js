@@ -196,7 +196,9 @@ function parseCatalogXml(xml) {
       category: getTag('category'),
       language: getTag('language'),
       icon: getAttr('link', 'href') || null,
-      tags: (getTag('tags') || '').split(';').filter(t => t)
+      tags: (getTag('tags') || '').split(';').filter(t => t),
+      updated: getTag('updated'),
+      issued: getTag('issued')
     });
   });
 
@@ -324,7 +326,7 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
   let filepath;
 
   try {
-    const { url, title, description, language, size, articleCount, mediaCount } = req.body;
+    const { url, title, description, language, size, articleCount, mediaCount, updated } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'Download URL required' });
@@ -403,8 +405,8 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
 
       // Add to database
       db.prepare(`
-        INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         filename,
         filepath,
@@ -414,7 +416,8 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
         fileSize,
         articleCount || null,
         mediaCount || null,
-        url
+        url,
+        updated || null
       );
 
       // Restart Kiwix server to include new file
@@ -463,7 +466,9 @@ router.get('/download/progress', authenticateToken, requireAdmin, (req, res) => 
       progress: d.progress,
       totalSize: d.totalSize,
       downloadedSize: d.downloadedSize,
-      status: d.status
+      status: d.status,
+      isUpdate: d.isUpdate || false,
+      originalId: d.originalId || null
     }));
 
     res.json(downloads);
@@ -725,10 +730,16 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
 
     const parsed = parseZimFilename(library.filename);
 
-    // Query Kiwix catalog for latest version
-    let url = `https://library.kiwix.org/catalog/v2/entries?count=50`;
+    // Query Kiwix catalog - use catalog name tag for better matching
+    // The catalog <name> tag usually matches our parsed name (without version)
+    let url = `https://library.kiwix.org/catalog/v2/entries?count=100`;
     if (parsed.name) {
-      url += `&q=${encodeURIComponent(parsed.name)}`;
+      // For domain-based names (e.g., pets.stackexchange.com_en_all), search for just the domain
+      // For other names (e.g., wikipedia_ace_all_nopic), search for first two parts
+      const searchTerm = parsed.name.includes('.')
+        ? parsed.name.split('_')[0].split('.')[0] // "pets" from "pets.stackexchange.com_en_all"
+        : parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+      url += `&q=${encodeURIComponent(searchTerm)}`;
     }
 
     const response = await axios.get(url, { timeout: 15000 });
@@ -762,32 +773,59 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
           size: size,
           filename: filename,
           parsedName: parsedEntry.name,
-          version: parsedEntry.version
+          version: parsedEntry.version,
+          updated: getTag('updated'),
+          articleCount: parseInt(getTag('articleCount')) || null,
+          mediaCount: parseInt(getTag('mediaCount')) || null
         });
       }
     });
 
-    // Find matching entry with newer version
-    // Match if either name includes the other (flexible matching)
+    // Find matching entry - match by filename similarity
+    // Compare the base filename (without version) from both the library and catalog entries
+    const libraryBase = library.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
+    console.log(`[Update Check] Library: ${library.title}, Base: ${libraryBase}, Updated: ${library.updated_date}`);
+
     const matchingEntries = entries.filter(e => {
-      if (!e.parsedName || !parsed.name) return false;
-      const eName = e.parsedName.toLowerCase();
-      const pName = parsed.name.toLowerCase();
-      return eName.includes(pName) || pName.includes(eName);
+      if (!e.filename) return false;
+      const catalogBase = e.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
+      // Exact match on base filename (with underscores converted to hyphens)
+      return catalogBase === libraryBase;
+    });
+
+    console.log(`[Update Check] Found ${matchingEntries.length} matching entries in catalog`);
+    matchingEntries.forEach(e => {
+      console.log(`  - ${e.filename}, Updated: ${e.updated}, Version: ${e.version}`);
     });
 
     let updateAvailable = false;
     let latestEntry = null;
 
     for (const entry of matchingEntries) {
-      if (entry.version && parsed.version) {
-        // Compare versions (dates)
+      // Prefer date comparison if both have updated dates
+      if (entry.updated && library.updated_date) {
+        const entryDate = new Date(entry.updated);
+        const libraryDate = new Date(library.updated_date);
+        console.log(`  Comparing dates: catalog ${entryDate.toISOString()} vs library ${libraryDate.toISOString()}`);
+        if (entryDate > libraryDate) {
+          if (!latestEntry || new Date(entry.updated) > new Date(latestEntry.updated)) {
+            latestEntry = entry;
+            updateAvailable = true;
+            console.log(`  -> Update found via date comparison!`);
+          }
+        }
+      } else if (entry.version && parsed.version) {
+        // Fallback to version comparison from filename
+        console.log(`  Comparing versions: catalog ${entry.version} vs library ${parsed.version}`);
         if (entry.version > parsed.version) {
           if (!latestEntry || entry.version > latestEntry.version) {
             latestEntry = entry;
             updateAvailable = true;
+            console.log(`  -> Update found via version comparison!`);
           }
         }
+      } else {
+        console.log(`  Skipping entry - no date or version to compare`);
       }
     }
 
@@ -796,14 +834,17 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
     if (updateAvailable && latestEntry) {
       db.prepare(`
         UPDATE zim_libraries
-        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?
+        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
+            available_update_article_count = ?, available_update_media_count = ?
         WHERE id = ?
-      `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, req.params.id);
+      `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, req.params.id);
 
       res.json({
         updateAvailable: true,
         currentVersion: parsed.version,
+        currentDate: library.updated_date,
         latestVersion: latestEntry.version,
+        latestDate: latestEntry.updated,
         updateUrl: latestEntry.url,
         updateSize: latestEntry.size,
         updateTitle: latestEntry.title
@@ -811,7 +852,8 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
     } else {
       db.prepare(`
         UPDATE zim_libraries
-        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL
+        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL, available_update_date = NULL,
+            available_update_article_count = NULL, available_update_media_count = NULL
         WHERE id = ?
       `).run(now, req.params.id);
 
@@ -837,9 +879,16 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
       try {
         const parsed = parseZimFilename(library.filename);
 
-        let url = `https://library.kiwix.org/catalog/v2/entries?count=50`;
+        // Query Kiwix catalog - use catalog name tag for better matching
+        // The catalog <name> tag usually matches our parsed name (without version)
+        let url = `https://library.kiwix.org/catalog/v2/entries?count=100`;
         if (parsed.name) {
-          url += `&q=${encodeURIComponent(parsed.name)}`;
+          // For domain-based names (e.g., pets.stackexchange.com_en_all), search for just the domain
+          // For other names (e.g., wikipedia_ace_all_nopic), search for first two parts
+          const searchTerm = parsed.name.includes('.')
+            ? parsed.name.split('_')[0].split('.')[0] // "pets" from "pets.stackexchange.com_en_all"
+            : parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+          url += `&q=${encodeURIComponent(searchTerm)}`;
         }
 
         const response = await axios.get(url, { timeout: 15000 });
@@ -873,23 +922,39 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
               size: size,
               filename: filename,
               parsedName: parsedEntry.name,
-              version: parsedEntry.version
+              version: parsedEntry.version,
+              updated: getTag('updated'),
+              articleCount: parseInt(getTag('articleCount')) || null,
+              mediaCount: parseInt(getTag('mediaCount')) || null
             });
           }
         });
 
+        // Find matching entry - match by filename similarity
+        const libraryBase = library.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
         const matchingEntries = entries.filter(e => {
-          if (!e.parsedName || !parsed.name) return false;
-          const eName = e.parsedName.toLowerCase();
-          const pName = parsed.name.toLowerCase();
-          return eName.includes(pName) || pName.includes(eName);
+          if (!e.filename) return false;
+          const catalogBase = e.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
+          // Exact match on base filename (with underscores converted to hyphens)
+          return catalogBase === libraryBase;
         });
 
         let updateAvailable = false;
         let latestEntry = null;
 
         for (const entry of matchingEntries) {
-          if (entry.version && parsed.version) {
+          // Prefer date comparison if both have updated dates
+          if (entry.updated && library.updated_date) {
+            const entryDate = new Date(entry.updated);
+            const libraryDate = new Date(library.updated_date);
+            if (entryDate > libraryDate) {
+              if (!latestEntry || new Date(entry.updated) > new Date(latestEntry.updated)) {
+                latestEntry = entry;
+                updateAvailable = true;
+              }
+            }
+          } else if (entry.version && parsed.version) {
+            // Fallback to version comparison from filename
             if (entry.version > parsed.version) {
               if (!latestEntry || entry.version > latestEntry.version) {
                 latestEntry = entry;
@@ -903,9 +968,10 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
         if (updateAvailable && latestEntry) {
           db.prepare(`
             UPDATE zim_libraries
-            SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?
+            SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
+                available_update_article_count = ?, available_update_media_count = ?
             WHERE id = ?
-          `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, library.id);
+          `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, library.id);
 
           results.push({
             id: library.id,
@@ -918,7 +984,8 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
         } else {
           db.prepare(`
             UPDATE zim_libraries
-            SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL
+            SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
+                available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
             WHERE id = ?
           `).run(now, library.id);
 
@@ -1047,10 +1114,12 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
         db.prepare(`
           UPDATE zim_libraries
           SET filename = ?, filepath = ?, size = ?,
-              available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
-              url = ?
+              available_update_url = NULL, available_update_version = NULL, available_update_size = NULL, available_update_date = NULL,
+              available_update_article_count = NULL, available_update_media_count = NULL,
+              url = ?, updated_date = ?, article_count = ?, media_count = ?
           WHERE id = ?
-        `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.id);
+        `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.available_update_date,
+               library.available_update_article_count, library.available_update_media_count, library.id);
 
         // Restart Kiwix server
         restartKiwixServer();
@@ -1085,7 +1154,9 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
     });
   } catch (err) {
     console.error('Update error:', err);
-    res.status(500).json({ error: 'Failed to start update: ' + err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to start update: ' + err.message });
+    }
   }
 });
 

@@ -65,7 +65,11 @@ export function initDatabase() {
       available_update_url TEXT,
       available_update_version TEXT,
       available_update_size INTEGER,
+      available_update_date TEXT,
+      available_update_article_count INTEGER,
+      available_update_media_count INTEGER,
       auto_update_enabled BOOLEAN DEFAULT 0,
+      updated_date TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -125,6 +129,26 @@ export function initDatabase() {
   }
   try {
     db.exec(`ALTER TABLE zim_libraries ADD COLUMN auto_update_enabled BOOLEAN DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN updated_date TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_date TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_article_count INTEGER`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_media_count INTEGER`);
   } catch (err) {
     // Column already exists
   }

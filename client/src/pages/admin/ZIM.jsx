@@ -11,10 +11,13 @@ export default function AdminZIM() {
   const [downloading, setDownloading] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [storageInfo, setStorageInfo] = useState(null);
+  const [updatingZims, setUpdatingZims] = useState(new Set());
 
   useEffect(() => {
     fetchLibraries();
     fetchDownloadProgress();
+    fetchStorageInfo();
 
     // Poll for download progress every 2 seconds if there are active downloads
     const interval = setInterval(() => {
@@ -31,6 +34,19 @@ export default function AdminZIM() {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await response.json();
+
+      // Check if any updating ZIMs have completed (no longer have available_update_url)
+      const shouldReload = Array.from(updatingZims).some(id => {
+        const lib = data.find(l => l.id === id);
+        return lib && !lib.available_update_url;
+      });
+
+      if (shouldReload) {
+        console.log('Update completed, reloading page...');
+        window.location.reload();
+        return; // Don't update state, just reload
+      }
+
       setLibraries(data);
     } catch (err) {
       console.error('Failed to fetch libraries:', err);
@@ -44,14 +60,31 @@ export default function AdminZIM() {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await response.json();
+
       setActiveDownloads(data);
 
-      // Refresh library list if downloads completed
-      if (data.length === 0 && activeDownloads.length > 0) {
+      // Refresh library list periodically to check for update completion
+      // (fetchLibraries will reload the page if an update completed)
+      if (updatingZims.size > 0 || data.length > 0) {
         fetchLibraries();
       }
     } catch (err) {
       console.error('Failed to fetch download progress:', err);
+    }
+  };
+
+  const fetchStorageInfo = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/system/storage', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setStorageInfo(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch storage info:', err);
     }
   };
 
@@ -150,7 +183,8 @@ export default function AdminZIM() {
           language: item.language,
           size: item.size,
           articleCount: item.articleCount,
-          mediaCount: item.mediaCount
+          mediaCount: item.mediaCount,
+          updated: item.updated
         })
       });
 
@@ -202,6 +236,9 @@ export default function AdminZIM() {
     if (!confirm('Download and install this update? The old version will be backed up during the process.')) return;
 
     try {
+      // Add to updating set
+      setUpdatingZims(prev => new Set(prev).add(id));
+
       const token = localStorage.getItem('token');
       const response = await fetch(`/api/zim/${id}/update`, {
         method: 'POST',
@@ -210,14 +247,26 @@ export default function AdminZIM() {
 
       if (response.ok) {
         alert('Update download started! Check back in a few minutes.');
-        fetchLibraries();
+        // Don't fetch libraries immediately - wait for download to complete
       } else {
         const error = await response.json();
         alert('Update failed: ' + (error.error || 'Unknown error'));
+        // Remove from updating set on failure
+        setUpdatingZims(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(id);
+          return newSet;
+        });
       }
     } catch (err) {
       console.error('Update failed:', err);
       alert('Update failed: ' + err.message);
+      // Remove from updating set on error
+      setUpdatingZims(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(id);
+        return newSet;
+      });
     }
   };
 
@@ -367,6 +416,33 @@ export default function AdminZIM() {
         </div>
       )}
 
+      {/* Storage Warning for Auto-Updates */}
+      {(() => {
+        const autoUpdateLibs = libraries.filter(lib => lib.auto_update_enabled);
+        if (autoUpdateLibs.length === 0 || !storageInfo) return null;
+
+        // Estimate update size as current library size
+        const totalUpdateSize = autoUpdateLibs.reduce((sum, lib) => sum + (lib.size || 0), 0);
+        const availableSpace = storageInfo.available;
+
+        if (totalUpdateSize > availableSpace) {
+          const shortfallGB = ((totalUpdateSize - availableSpace) / 1024 / 1024 / 1024).toFixed(2);
+          return (
+            <div style={{
+              background: 'var(--warning)',
+              color: 'white',
+              padding: '1rem',
+              borderRadius: '8px',
+              marginBottom: '1rem'
+            }}>
+              <strong>⚠️ Storage Warning:</strong> Auto-updates for {autoUpdateLibs.length} ZIM{autoUpdateLibs.length > 1 ? 's' : ''} may require up to {formatSize(totalUpdateSize)} of space during updates.
+              You are short approximately {shortfallGB} GB. Consider disabling auto-update for some libraries or freeing up disk space.
+            </div>
+          );
+        }
+        return null;
+      })()}
+
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
           <h2 className="card-header" style={{ margin: 0 }}>Installed Libraries ({libraries.length})</h2>
@@ -394,18 +470,20 @@ export default function AdminZIM() {
                 <th>Language</th>
                 <th>Size</th>
                 <th>Articles</th>
-                <th>Auto-Update</th>
+                <th>Last Updated</th>
+                <th style={{ textAlign: 'center' }}>Auto-Update</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {libraries.map(lib => {
                 const hasUpdate = lib.available_update_url && lib.available_update_version;
+                const isUpdating = updatingZims.has(lib.id);
                 return (
                   <tr key={lib.id}>
                     <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {decodeHtml(lib.title)}
-                      {hasUpdate && (
+                      {hasUpdate && !isUpdating && (
                         <span style={{
                           marginLeft: '0.5rem',
                           background: 'var(--warning)',
@@ -418,6 +496,19 @@ export default function AdminZIM() {
                           UPDATE
                         </span>
                       )}
+                      {isUpdating && (
+                        <span style={{
+                          marginLeft: '0.5rem',
+                          background: 'var(--primary)',
+                          color: 'white',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          fontSize: '0.7rem',
+                          fontWeight: 'bold'
+                        }}>
+                          UPDATING...
+                        </span>
+                      )}
                     </td>
                     <td>
                       {lib.language
@@ -428,18 +519,16 @@ export default function AdminZIM() {
                     </td>
                     <td>{formatSize(lib.size)}</td>
                     <td>{lib.article_count?.toLocaleString() || '-'}</td>
-                    <td>
-                      <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '0.5rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={lib.auto_update_enabled || false}
-                          onChange={() => handleToggleAutoUpdate(lib.id, lib.auto_update_enabled)}
-                          style={{ cursor: 'pointer' }}
-                        />
-                        <span style={{ fontSize: '0.875rem' }}>
-                          {lib.auto_update_enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                      </label>
+                    <td style={{ fontSize: '0.875rem' }}>
+                      {lib.updated_date ? new Date(lib.updated_date).toLocaleDateString() : '-'}
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        checked={lib.auto_update_enabled || false}
+                        onChange={() => handleToggleAutoUpdate(lib.id, lib.auto_update_enabled)}
+                        style={{ cursor: 'pointer' }}
+                      />
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -448,13 +537,15 @@ export default function AdminZIM() {
                             onClick={() => handleUpdate(lib.id)}
                             className="btn btn-sm btn-primary"
                             title={`Update to version ${lib.available_update_version}`}
+                            disabled={isUpdating}
                           >
-                            Update
+                            {isUpdating ? 'Updating...' : 'Update'}
                           </button>
                         )}
                         <button
                           onClick={() => handleDelete(lib.id)}
                           className="btn btn-sm btn-danger"
+                          disabled={isUpdating}
                         >
                           Delete
                         </button>
