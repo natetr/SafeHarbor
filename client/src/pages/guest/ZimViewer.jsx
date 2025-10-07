@@ -1,5 +1,5 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { decodeHtml } from '../../utils/htmlDecode';
 
 export default function ZimViewer() {
@@ -8,10 +8,79 @@ export default function ZimViewer() {
   const [zim, setZim] = useState(null);
   const [loading, setLoading] = useState(true);
   const [headerVisible, setHeaderVisible] = useState(true);
+  const iframeRef = useRef(null);
 
   useEffect(() => {
     fetchZim();
   }, [id]);
+
+  // Extract and apply favicon/title from iframe content
+  useEffect(() => {
+    if (!zim || !iframeRef.current) return;
+
+    const updateFromIframe = () => {
+      try {
+        const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
+        if (!iframeDoc) return;
+
+        // Extract title from iframe
+        const iframeTitle = iframeDoc.title;
+        if (iframeTitle) {
+          document.title = iframeTitle + ' - SafeHarbor';
+        }
+
+        // Extract favicon from iframe
+        const faviconLinks = iframeDoc.querySelectorAll('link[rel*="icon"]');
+        if (faviconLinks.length > 0) {
+          // Remove existing favicons from parent
+          const existingFavicons = document.querySelectorAll('link[rel*="icon"]');
+          existingFavicons.forEach(icon => icon.remove());
+
+          // Copy favicon from iframe to parent
+          faviconLinks.forEach(link => {
+            const newLink = document.createElement('link');
+            newLink.rel = link.rel;
+            newLink.type = link.type || 'image/x-icon';
+            // Handle relative URLs by prepending the iframe's base URL
+            if (link.href.startsWith('http')) {
+              newLink.href = link.href;
+            } else {
+              const iframeBaseUrl = iframeDoc.baseURI || zim.kiwixUrl;
+              newLink.href = new URL(link.getAttribute('href'), iframeBaseUrl).href;
+            }
+            document.head.appendChild(newLink);
+          });
+        }
+      } catch (e) {
+        // Cross-origin restrictions prevent access to iframe content
+        // Fall back to using ZIM metadata
+        console.log('Cannot access iframe content (cross-origin), using ZIM metadata');
+        document.title = decodeHtml(zim.title) + ' - SafeHarbor';
+
+        if (zim.icon) {
+          const faviconUrl = `http://localhost:8080${zim.icon}`;
+          const existingFavicons = document.querySelectorAll('link[rel*="icon"]');
+          existingFavicons.forEach(icon => icon.remove());
+
+          const link = document.createElement('link');
+          link.rel = 'icon';
+          link.type = 'image/png';
+          link.href = faviconUrl;
+          document.head.appendChild(link);
+        }
+      }
+    };
+
+    // Listen for iframe load event
+    const iframe = iframeRef.current;
+    iframe.addEventListener('load', updateFromIframe);
+
+    // Cleanup
+    return () => {
+      iframe?.removeEventListener('load', updateFromIframe);
+      document.title = 'SafeHarbor';
+    };
+  }, [zim]);
 
   const fetchZim = async () => {
     try {
@@ -117,6 +186,7 @@ export default function ZimViewer() {
 
       {/* ZIM iframe */}
       <iframe
+        ref={iframeRef}
         src={zim.kiwixUrl}
         style={{
           flex: 1,
