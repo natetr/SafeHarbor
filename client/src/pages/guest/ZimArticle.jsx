@@ -1,15 +1,72 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 export default function ZimArticle() {
   const location = useLocation();
   const navigate = useNavigate();
   const [headerVisible, setHeaderVisible] = useState(true);
+  const iframeRef = useRef(null);
 
   // Get the kiwix URL from query params
   const params = new URLSearchParams(location.search);
   const kiwixUrl = params.get('url');
   const zimTitle = params.get('zimTitle') || 'ZIM Article';
+
+  // Extract and apply favicon/title from iframe content
+  useEffect(() => {
+    if (!kiwixUrl || !iframeRef.current) return;
+
+    const updateFromIframe = () => {
+      try {
+        const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
+        if (!iframeDoc) return;
+
+        // Extract title from iframe
+        const iframeTitle = iframeDoc.title;
+        if (iframeTitle) {
+          document.title = iframeTitle + ' - SafeHarbor';
+        }
+
+        // Extract favicon from iframe
+        const faviconLinks = iframeDoc.querySelectorAll('link[rel*="icon"]');
+        if (faviconLinks.length > 0) {
+          // Remove existing favicons from parent
+          const existingFavicons = document.querySelectorAll('link[rel*="icon"]');
+          existingFavicons.forEach(icon => icon.remove());
+
+          // Copy favicon from iframe to parent
+          faviconLinks.forEach(link => {
+            const newLink = document.createElement('link');
+            newLink.rel = link.rel;
+            newLink.type = link.type || 'image/x-icon';
+            // Handle relative URLs by prepending the iframe's base URL
+            if (link.href.startsWith('http')) {
+              newLink.href = link.href;
+            } else {
+              const iframeBaseUrl = iframeDoc.baseURI || kiwixUrl;
+              newLink.href = new URL(link.getAttribute('href'), iframeBaseUrl).href;
+            }
+            document.head.appendChild(newLink);
+          });
+        }
+      } catch (e) {
+        // Cross-origin restrictions prevent access to iframe content
+        // Fall back to using the zimTitle from query params
+        console.log('Cannot access iframe content (cross-origin), using query params');
+        document.title = zimTitle + ' - SafeHarbor';
+      }
+    };
+
+    // Listen for iframe load event
+    const iframe = iframeRef.current;
+    iframe.addEventListener('load', updateFromIframe);
+
+    // Cleanup
+    return () => {
+      iframe?.removeEventListener('load', updateFromIframe);
+      document.title = 'SafeHarbor';
+    };
+  }, [kiwixUrl, zimTitle]);
 
   if (!kiwixUrl) {
     return (
@@ -83,6 +140,7 @@ export default function ZimArticle() {
 
       {/* ZIM article iframe */}
       <iframe
+        ref={iframeRef}
         src={kiwixUrl}
         style={{
           flex: 1,
