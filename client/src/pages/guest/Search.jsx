@@ -71,8 +71,8 @@ export default function GuestSearch() {
   };
 
   const handleOpenZimArticle = (result) => {
-    // Navigate to ZIM article viewer with header
-    navigate(`/zim-article?url=${encodeURIComponent(result.url)}&zimTitle=${encodeURIComponent(result.zimTitle)}`);
+    // Open ZIM article directly in new tab
+    window.open(result.url, '_blank');
   };
 
   const toggleLibraryFilter = (library) => {
