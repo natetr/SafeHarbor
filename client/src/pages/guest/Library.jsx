@@ -112,7 +112,7 @@ export default function GuestLibrary() {
 
   const handleOpenZim = (zim) => {
     if (zim.kiwixUrl) {
-      navigate(`/zim/${zim.id}`);
+      window.open(zim.kiwixUrl, '_blank');
     } else {
       alert('ZIM library not accessible. Kiwix server may not be running.');
     }

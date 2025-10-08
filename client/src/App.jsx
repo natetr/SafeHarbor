@@ -6,8 +6,6 @@ import Login from './pages/Login';
 import GuestSearch from './pages/guest/Search';
 import GuestLibrary from './pages/guest/Library';
 import GuestPlayer from './pages/guest/Player';
-import ZimViewer from './pages/guest/ZimViewer';
-import ZimArticle from './pages/guest/ZimArticle';
 import AdminDashboard from './pages/admin/Dashboard';
 import AdminContent from './pages/admin/Content';
 import AdminZIM from './pages/admin/ZIM';
@@ -80,10 +78,6 @@ function App() {
           <Route path="search" element={<GuestSearch />} />
           <Route path="play/:id" element={<GuestPlayer />} />
         </Route>
-
-        {/* ZIM Viewer - standalone without layout */}
-        <Route path="/zim/:id" element={<ZimViewer />} />
-        <Route path="/zim-article" element={<ZimArticle />} />
 
         {/* Login */}
         <Route path="/login" element={
