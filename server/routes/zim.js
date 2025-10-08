@@ -18,6 +18,8 @@ const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 const KIWIX_SERVE_PATH = process.env.KIWIX_SERVE_PATH || path.join(__dirname, '../../bin/kiwix-serve');
 
 let kiwixProcess = null;
+let kiwixStartTime = null;
+let lastAddedZimId = null; // Track the most recently added ZIM
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -83,12 +85,16 @@ function startKiwixServer() {
 
   let zimFiles;
   try {
-    zimFiles = db.prepare('SELECT filepath FROM zim_libraries').all();
+    // Only load ZIMs with status='active'
+    zimFiles = db.prepare("SELECT id, filepath, filename, title FROM zim_libraries WHERE status = 'active'").all();
 
     if (zimFiles.length === 0) {
-      console.log('No ZIM files to serve');
+      console.log('No active ZIM files to serve');
       return;
     }
+
+    console.log(`Starting Kiwix with ${zimFiles.length} ZIM file(s):`);
+    zimFiles.forEach(z => console.log(`  - ${z.title || z.filename}`));
   } catch (err) {
     console.log('Kiwix: Database not ready yet or no ZIM files');
     return;
@@ -107,19 +113,84 @@ function startKiwixServer() {
       stdio: 'inherit'
     });
 
+    kiwixStartTime = Date.now();
+
     kiwixProcess.on('error', (err) => {
       console.error('Kiwix server error:', err);
       kiwixProcess = null;
+      kiwixStartTime = null;
     });
 
     kiwixProcess.on('exit', (code) => {
-      console.log(`Kiwix server exited with code ${code}`);
+      const uptime = kiwixStartTime ? Math.round((Date.now() - kiwixStartTime) / 1000) : 0;
+      console.log(`Kiwix server exited with code ${code} after ${uptime} seconds`);
+
+      // Detect crash - if Kiwix exits with non-zero code or crashes within 10 seconds
+      if ((code !== 0 && code !== null) || uptime < 10) {
+        console.error('⚠️  Kiwix crashed! Attempting recovery...');
+
+        let zimToQuarantine = null;
+
+        // Strategy 1: If we recently added a ZIM, it's likely the culprit
+        if (lastAddedZimId) {
+          const recentZim = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(lastAddedZimId);
+          if (recentZim && recentZim.status === 'active') {
+            zimToQuarantine = recentZim;
+            console.error(`Suspect: Recently added ZIM - ${zimToQuarantine.title || zimToQuarantine.filename}`);
+          }
+        }
+
+        // Strategy 2: If no recent ZIM, find the most recently created active ZIM
+        if (!zimToQuarantine) {
+          const newestZim = db.prepare("SELECT * FROM zim_libraries WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").get();
+          if (newestZim) {
+            zimToQuarantine = newestZim;
+            console.error(`Suspect: Newest ZIM in database - ${zimToQuarantine.title || zimToQuarantine.filename}`);
+          }
+        }
+
+        // Quarantine the suspected ZIM
+        if (zimToQuarantine) {
+          try {
+            console.error(`Quarantining problematic ZIM: ${zimToQuarantine.title || zimToQuarantine.filename}`);
+
+            // Quarantine the ZIM
+            db.prepare("UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?")
+              .run(`Kiwix crashed when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`, zimToQuarantine.id);
+
+            // Log the quarantine
+            logZimActivity('zim_quarantined', {
+              zimTitle: zimToQuarantine.title,
+              zimFilename: zimToQuarantine.filename,
+              zimId: zimToQuarantine.id,
+              details: `Automatically quarantined after Kiwix crash (code: ${code}, uptime: ${uptime}s)`,
+              status: 'success'
+            });
+
+            lastAddedZimId = null; // Reset
+
+            // Retry without the problematic ZIM
+            console.log('Retrying Kiwix server without the problematic ZIM...');
+            setTimeout(() => startKiwixServer(), 2000);
+            return;
+          } catch (err) {
+            console.error('Error during quarantine process:', err);
+          }
+        }
+
+        // If we couldn't identify a specific ZIM to quarantine, just retry
+        console.log('Could not identify problematic ZIM. Attempting to restart Kiwix...');
+        setTimeout(() => startKiwixServer(), 5000);
+      }
+
       kiwixProcess = null;
+      kiwixStartTime = null;
     });
 
     console.log(`Kiwix server started on port ${KIWIX_PORT}`);
   } catch (err) {
     console.error('Failed to start Kiwix server:', err);
+    kiwixStartTime = null;
   }
 }
 
@@ -148,8 +219,10 @@ router.get('/', optionalAuth, async (req, res) => {
 
     let query = 'SELECT * FROM zim_libraries';
     if (!isAdmin) {
-      query += ' WHERE hidden = 0';
+      // Non-admin users only see active, non-hidden ZIMs
+      query += " WHERE hidden = 0 AND status = 'active'";
     }
+    // Admins see all ZIMs including quarantined ones
     query += ' ORDER BY title';
 
     const libraries = db.prepare(query).all();
@@ -430,6 +503,13 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
     writer.on('finish', async () => {
       const download = activeDownloads.get(filename);
       const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
+
+      // Close the writer and wait for file system to flush
+      writer.close();
+
+      // Small delay to ensure OS has flushed all buffers to disk
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       activeDownloads.delete(filename);
 
       // Get file size from filesystem
@@ -437,14 +517,36 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       try {
         const stats = fs.statSync(filepath);
         fileSize = stats.size;
+
+        // Validate file size if we know the expected size
+        if (size && Math.abs(fileSize - size) > 1024) { // Allow 1KB difference
+          throw new Error(`File size mismatch. Expected: ${size}, Got: ${fileSize}. Download may be corrupted.`);
+        }
       } catch (err) {
-        console.error('Could not read file size:', err);
+        console.error('File validation error:', err);
+
+        // Log download failure
+        logZimActivity('download_failed', {
+          zimTitle: title || filename,
+          zimFilename: filename,
+          details: `File validation failed: ${err.message}`,
+          userId: req.user?.id,
+          status: 'failed',
+          errorMessage: err.message,
+          downloadDuration: downloadDuration
+        });
+
+        // Delete corrupted file
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        return;
       }
 
-      // Add to database
+      // Add to database with status='active'
       const result = db.prepare(`
-        INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
       `).run(
         filename,
         filepath,
@@ -470,10 +572,14 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
         downloadDuration: downloadDuration
       });
 
-      // Restart Kiwix server to include new file
-      restartKiwixServer();
+      // Track this as the most recently added ZIM for crash detection
+      lastAddedZimId = result.lastInsertRowid;
 
-      console.log(`ZIM download complete: ${filename}`);
+      // Delay before restarting Kiwix to ensure file is ready
+      console.log(`ZIM download complete: ${filename}. Restarting Kiwix in 3 seconds...`);
+      setTimeout(() => {
+        restartKiwixServer();
+      }, 3000);
     });
 
     writer.on('error', (err) => {
@@ -662,7 +768,7 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
 // Update ZIM library metadata
 router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
   try {
-    const { title, description, hidden } = req.body;
+    const { title, description, hidden, status, error_message } = req.body;
 
     const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
     if (!library) {
@@ -688,6 +794,18 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
       params.push(hidden ? 1 : 0);
       changes.push(`visibility: ${hidden ? 'hidden' : 'visible'}`);
     }
+    if (status !== undefined) {
+      updates.push('status = ?');
+      params.push(status);
+      changes.push(`status: "${library.status}" → "${status}"`);
+    }
+    if (error_message !== undefined) {
+      updates.push('error_message = ?');
+      params.push(error_message);
+      if (error_message === null) {
+        changes.push(`error cleared`);
+      }
+    }
 
     if (updates.length > 0) {
       params.push(req.params.id);
@@ -702,6 +820,12 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
         userId: req.user?.id,
         status: 'success'
       });
+
+      // If status changed to 'active', restart Kiwix to load the ZIM
+      if (status === 'active' && library.status !== 'active') {
+        console.log(`Reactivating ZIM: ${library.title}`);
+        restartKiwixServer();
+      }
     }
 
     res.json({ message: 'ZIM library updated successfully' });
@@ -1262,6 +1386,9 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
           fileSize: stats.size,
           downloadDuration: downloadDuration
         });
+
+        // Track this as the most recently added/updated ZIM for crash detection
+        lastAddedZimId = library.id;
 
         // Restart Kiwix server
         restartKiwixServer();

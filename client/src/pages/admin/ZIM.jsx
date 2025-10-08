@@ -293,6 +293,32 @@ export default function AdminZIM() {
     }
   };
 
+  const handleReactivate = async (id) => {
+    if (!confirm('Reactivate this ZIM? It will be loaded into Kiwix server again. If the issue persists, it may be quarantined again.')) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/zim/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status: 'active', error_message: null })
+      });
+
+      if (response.ok) {
+        alert('ZIM reactivated. Kiwix will restart to load it.');
+        fetchLibraries();
+      } else {
+        alert('Failed to reactivate ZIM');
+      }
+    } catch (err) {
+      console.error('Reactivate failed:', err);
+      alert('Reactivate failed: ' + err.message);
+    }
+  };
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
@@ -487,11 +513,25 @@ export default function AdminZIM() {
               {libraries.map(lib => {
                 const hasUpdate = lib.available_update_url && lib.available_update_version;
                 const isUpdating = updatingZims.has(lib.id);
+                const isQuarantined = lib.status === 'quarantined';
                 return (
-                  <tr key={lib.id}>
+                  <tr key={lib.id} style={isQuarantined ? { background: 'rgba(255, 0, 0, 0.05)' } : {}}>
                     <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {decodeHtml(lib.title)}
-                      {hasUpdate && !isUpdating && (
+                      {isQuarantined && (
+                        <span style={{
+                          marginLeft: '0.5rem',
+                          background: '#dc3545',
+                          color: 'white',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          fontSize: '0.7rem',
+                          fontWeight: 'bold'
+                        }}>
+                          ⚠️ QUARANTINED
+                        </span>
+                      )}
+                      {hasUpdate && !isUpdating && !isQuarantined && (
                         <span style={{
                           marginLeft: '0.5rem',
                           background: 'var(--warning)',
@@ -517,6 +557,18 @@ export default function AdminZIM() {
                           UPDATING...
                         </span>
                       )}
+                      {isQuarantined && lib.error_message && (
+                        <div style={{
+                          marginTop: '0.5rem',
+                          padding: '0.5rem',
+                          background: 'rgba(220, 53, 69, 0.1)',
+                          borderLeft: '3px solid #dc3545',
+                          fontSize: '0.875rem',
+                          color: '#dc3545'
+                        }}>
+                          <strong>Error:</strong> {lib.error_message}
+                        </div>
+                      )}
                     </td>
                     <td>
                       {lib.language
@@ -540,7 +592,16 @@ export default function AdminZIM() {
                     </td>
                     <td>
                       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        {hasUpdate && (
+                        {isQuarantined && (
+                          <button
+                            onClick={() => handleReactivate(lib.id)}
+                            className="btn btn-sm"
+                            style={{ background: '#28a745', color: 'white' }}
+                          >
+                            Reactivate
+                          </button>
+                        )}
+                        {hasUpdate && !isQuarantined && (
                           <button
                             onClick={() => handleUpdate(lib.id)}
                             className="btn btn-sm btn-primary"
