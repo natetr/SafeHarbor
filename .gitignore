@@ -1,13 +1,28 @@
+# Dependencies
 node_modules/
 client/node_modules/
+
+# Build output
 client/dist/
+
+# Environment and configuration
 .env
+
+# Database files
 *.db
 *.db-journal
+
+# Logs
 *.log
+
+# Data directories (local and production)
 data/
 content/
 zim/
 uploads/
+
+# OS files
 .DS_Store
+
+# Backup files
 bin/kiwix-serve.bak-*
