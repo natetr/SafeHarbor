@@ -13,7 +13,7 @@ const __dirname = path.dirname(__filename);
 
 const router = express.Router();
 
-const ZIM_DIR = process.env.ZIM_DIR || './zim';
+const ZIM_DIR = path.resolve(process.env.ZIM_DIR || './zim');
 const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 const KIWIX_SERVE_PATH = process.env.KIWIX_SERVE_PATH || path.join(__dirname, '../../bin/kiwix-serve');
 
