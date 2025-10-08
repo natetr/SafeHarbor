@@ -33,10 +33,10 @@ const PORT = process.env.PORT || 3000;
 
 // Create necessary directories
 const dirs = [
-  process.env.DATA_DIR || './data',
-  process.env.CONTENT_DIR || './content',
-  process.env.ZIM_DIR || './zim',
-  './uploads'
+  path.resolve(process.env.DATA_DIR || './data'),
+  path.resolve(process.env.CONTENT_DIR || './content'),
+  path.resolve(process.env.ZIM_DIR || './zim'),
+  path.resolve('./uploads')
 ];
 
 dirs.forEach(dir => {
