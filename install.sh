@@ -27,13 +27,72 @@ apt-get install -y \
   npm \
   hostapd \
   dnsmasq \
-  kiwix-tools \
   sqlite3 \
   git \
   curl \
   wireless-tools \
   wpasupplicant \
   iptables
+
+# Install kiwix-tools with libzim 9.2.0+ (fixes macOS/large file mmap issues)
+echo "Installing kiwix-tools..."
+KIWIX_VERSION="3.7.0-2"
+
+# Detect architecture
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+  KIWIX_ARCH="aarch64"
+elif [ "$ARCH" = "armv7l" ] || [ "$ARCH" = "armhf" ]; then
+  KIWIX_ARCH="armhf"
+elif [ "$ARCH" = "x86_64" ]; then
+  KIWIX_ARCH="x86_64"
+else
+  echo "Warning: Unknown architecture $ARCH, falling back to apt-get kiwix-tools"
+  apt-get install -y kiwix-tools
+  KIWIX_ARCH=""
+fi
+
+if [ -n "$KIWIX_ARCH" ]; then
+  echo "Detected architecture: $KIWIX_ARCH"
+  KIWIX_URL="https://download.kiwix.org/release/kiwix-tools/kiwix-tools_linux-${KIWIX_ARCH}-${KIWIX_VERSION}.tar.gz"
+
+  # Download and extract kiwix-tools
+  cd /tmp
+  echo "Downloading kiwix-tools from $KIWIX_URL..."
+  curl -L -o kiwix-tools.tar.gz "$KIWIX_URL"
+
+  if [ $? -eq 0 ]; then
+    echo "Extracting kiwix-tools..."
+    tar -xzf kiwix-tools.tar.gz
+
+    # Find the extracted directory
+    KIWIX_DIR=$(find /tmp -maxdepth 1 -type d -name "kiwix-tools_linux-${KIWIX_ARCH}-${KIWIX_VERSION}" | head -n 1)
+
+    if [ -d "$KIWIX_DIR" ]; then
+      # Install to /usr/local/bin
+      mkdir -p /usr/local/bin
+      cp "$KIWIX_DIR"/kiwix-* /usr/local/bin/
+      chmod +x /usr/local/bin/kiwix-*
+
+      # Verify installation
+      /usr/local/bin/kiwix-serve --version
+      echo "kiwix-tools $KIWIX_VERSION installed successfully"
+    else
+      echo "Error: Could not find extracted kiwix-tools directory"
+      echo "Falling back to apt-get kiwix-tools"
+      apt-get install -y kiwix-tools
+    fi
+
+    # Cleanup
+    rm -f /tmp/kiwix-tools.tar.gz
+    rm -rf "$KIWIX_DIR"
+  else
+    echo "Error downloading kiwix-tools, falling back to apt-get"
+    apt-get install -y kiwix-tools
+  fi
+
+  cd - > /dev/null
+fi
 
 # Stop services that will be configured later
 systemctl stop hostapd || true
