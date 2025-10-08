@@ -260,14 +260,16 @@ router.get('/', optionalAuth, async (req, res) => {
       const catalogEntry = catalog.find(c => c.name && zimName.startsWith(c.name));
 
       // Use catalog's content path if available, otherwise construct from filename
-      let contentUrl;
+      // Use relative path so it works when accessing from other devices
+      let contentPath;
       if (catalogEntry?.contentPath) {
-        // Use authoritative URL from kiwix-serve catalog
-        contentUrl = `http://localhost:${KIWIX_PORT}${catalogEntry.contentPath}`;
+        // Use authoritative path from kiwix-serve catalog
+        contentPath = catalogEntry.contentPath;
       } else {
         // Fallback to filename-based construction
-        contentUrl = `http://localhost:${KIWIX_PORT}/content/${zimName}`;
+        contentPath = `/content/${zimName}`;
       }
+      const contentUrl = contentPath;
 
       return {
         ...lib,

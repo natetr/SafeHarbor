@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { rateLimit } from 'express-rate-limit';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -104,8 +105,22 @@ app.use('/api/system', systemRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/storage', storageRoutes);
 
-// Serve static content files
-app.use('/content', express.static(process.env.CONTENT_DIR || './content'));
+// Proxy /content requests to kiwix-serve
+const KIWIX_PORT = process.env.KIWIX_PORT || 8080;
+app.use('/content', createProxyMiddleware({
+  target: `http://localhost:${KIWIX_PORT}`,
+  changeOrigin: true,
+  logLevel: 'silent'
+}));
+
+// Proxy /catalog requests to kiwix-serve (for icons and metadata)
+app.use('/catalog', createProxyMiddleware({
+  target: `http://localhost:${KIWIX_PORT}`,
+  changeOrigin: true,
+  logLevel: 'silent'
+}));
+
+// Serve static ZIM files (for download/management only)
 app.use('/zim', express.static(process.env.ZIM_DIR || './zim'));
 
 // Serve frontend in production
