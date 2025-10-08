@@ -474,6 +474,34 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
 
     // Download file
     const writer = fs.createWriteStream(filepath);
+
+    // Attach error handler immediately to prevent crashes
+    writer.on('error', (err) => {
+      console.error('Download write error:', err);
+      const download = activeDownloads.get(filename);
+      const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
+      activeDownloads.delete(filename);
+
+      // Log download failure
+      logZimActivity('download_failed', {
+        zimTitle: title || filename,
+        zimFilename: filename,
+        details: `Write error: ${err.message}`,
+        userId: req.user?.id,
+        status: 'failed',
+        errorMessage: err.message,
+        downloadDuration: downloadDuration
+      });
+
+      if (fs.existsSync(filepath)) {
+        try {
+          fs.unlinkSync(filepath);
+        } catch (cleanupErr) {
+          console.error('Failed to cleanup partial download:', cleanupErr);
+        }
+      }
+    });
+
     const response = await axios({
       url,
       method: 'GET',
@@ -580,28 +608,6 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       setTimeout(() => {
         restartKiwixServer();
       }, 3000);
-    });
-
-    writer.on('error', (err) => {
-      console.error('Download error:', err);
-      const download = activeDownloads.get(filename);
-      const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
-      activeDownloads.delete(filename);
-
-      // Log download failure
-      logZimActivity('download_failed', {
-        zimTitle: title || filename,
-        zimFilename: filename,
-        details: `URL: ${url}`,
-        userId: req.user?.id,
-        status: 'failed',
-        errorMessage: err.message,
-        downloadDuration: downloadDuration
-      });
-
-      if (fs.existsSync(filepath)) {
-        fs.unlinkSync(filepath);
-      }
     });
   } catch (err) {
     console.error('Download error:', err);

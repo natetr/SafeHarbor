@@ -39,9 +39,18 @@ const dirs = [
   path.resolve('./uploads')
 ];
 
+console.log('Creating necessary directories...');
 dirs.forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`✓ Created directory: ${dir}`);
+    } else {
+      console.log(`✓ Directory exists: ${dir}`);
+    }
+  } catch (err) {
+    console.error(`✗ Failed to create directory ${dir}:`, err.message);
+    process.exit(1);
   }
 });
 
