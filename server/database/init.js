@@ -305,6 +305,18 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add status and error_message columns for crash detection and quarantine
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN status TEXT DEFAULT 'active'`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN error_message TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+
   console.log('Database initialized successfully');
 }
 
