@@ -110,14 +110,30 @@ const KIWIX_PORT = process.env.KIWIX_PORT || 8080;
 app.use('/content', createProxyMiddleware({
   target: `http://localhost:${KIWIX_PORT}`,
   changeOrigin: true,
-  logLevel: 'silent'
+  logLevel: 'warn',
+  on: {
+    proxyRes: (proxyRes, req, res) => {
+      // Rewrite redirect Location headers to go through our proxy
+      if (proxyRes.headers.location) {
+        const location = proxyRes.headers.location;
+        // If it's a relative redirect starting with /content or /catalog, keep it relative
+        if (location.startsWith('/content') || location.startsWith('/catalog')) {
+          // Already relative, no change needed
+        } else if (location.startsWith('http')) {
+          // Absolute URL - extract path
+          const url = new URL(location);
+          proxyRes.headers.location = url.pathname + url.search;
+        }
+      }
+    }
+  }
 }));
 
 // Proxy /catalog requests to kiwix-serve (for icons and metadata)
 app.use('/catalog', createProxyMiddleware({
   target: `http://localhost:${KIWIX_PORT}`,
   changeOrigin: true,
-  logLevel: 'silent'
+  logLevel: 'warn'
 }));
 
 // Serve static ZIM files (for download/management only)
