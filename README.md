@@ -229,6 +229,33 @@ ZIM files contain compressed websites like Wikipedia for offline use.
 4. Click "Download"
 5. Wait for download to complete (large files may take hours)
 
+### Batch Import/Export
+
+Share your ZIM catalog between devices:
+
+**Exporting:**
+1. Navigate to Admin → ZIM Libraries
+2. Click "Export" button (next to "Check for Updates")
+3. A JSON file will download to your device with all installed ZIM URLs
+
+**Importing:**
+1. Switch to Home Network Mode (required for downloading)
+2. Navigate to Admin → ZIM Libraries
+3. Click "Import" button
+4. Upload the exported JSON file
+5. Review ZIMs in card layout - all selected by default
+6. Deselect any unwanted ZIMs
+7. Monitor storage requirements shown at top
+8. Preview ZIMs on Kiwix catalog if needed
+9. Click "Install Selected" to batch download
+
+**Notes:**
+- Export works in any network mode
+- Import requires Home Network Mode (downloads need internet)
+- Already-installed ZIMs shown as disabled with badge
+- Storage space checked before installation
+- All downloads tracked in existing progress system
+
 ### Popular ZIM Libraries
 
 - **wikipedia_en_simple_all** (~200MB) - Simple English Wikipedia

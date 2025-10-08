@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
+import { formatSize } from '../../utils/formatSize';
 import StorageInfo from '../../components/StorageInfo';
 
 export default function AdminZIM() {
+  const navigate = useNavigate();
   const [libraries, setLibraries] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [showCatalog, setShowCatalog] = useState(false);
@@ -76,7 +79,7 @@ export default function AdminZIM() {
   const fetchStorageInfo = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/system/storage', {
+      const response = await fetch('/api/storage/usage', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (response.ok) {
@@ -91,6 +94,34 @@ export default function AdminZIM() {
   const fetchCatalog = async () => {
     // Navigate to catalog page instead of fetching inline
     window.location.href = '/admin/zim/catalog';
+  };
+
+  const handleExport = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/export', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `safeharbor-zims-${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        alert(`Successfully exported ${libraries.length} ZIM(s) to file`);
+      } else {
+        const error = await response.json();
+        alert('Export failed: ' + (error.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Export failed:', err);
+      alert('Export failed: ' + err.message);
+    }
   };
 
   const handleDelete = async (id) => {
@@ -327,7 +358,7 @@ export default function AdminZIM() {
           onClick={() => window.location.href = '/admin/zim/logs'}
           className="btn btn-secondary"
         >
-          📋 View Activity Logs
+          View Logs
         </button>
       </div>
 
@@ -480,13 +511,28 @@ export default function AdminZIM() {
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
           <h2 className="card-header" style={{ margin: 0 }}>Installed Libraries ({libraries.length})</h2>
-          <button
-            onClick={handleCheckUpdates}
-            disabled={checkingUpdates || libraries.length === 0}
-            className="btn btn-primary"
-          >
-            {checkingUpdates ? 'Checking...' : 'Check for Updates'}
-          </button>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button
+              onClick={() => navigate('/admin/zim/import')}
+              className="btn btn-secondary"
+            >
+              Import
+            </button>
+            <button
+              onClick={handleExport}
+              disabled={libraries.length === 0}
+              className="btn btn-secondary"
+            >
+              Export
+            </button>
+            <button
+              onClick={handleCheckUpdates}
+              disabled={checkingUpdates || libraries.length === 0}
+              className="btn btn-primary"
+            >
+              {checkingUpdates ? 'Checking...' : 'Check for Updates'}
+            </button>
+          </div>
         </div>
         {libraries.length === 0 ? (
           <div>
@@ -629,11 +675,4 @@ export default function AdminZIM() {
       </div>
     </div>
   );
-}
-
-function formatSize(bytes) {
-  if (!bytes) return 'Unknown';
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
 }

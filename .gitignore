@@ -10,3 +10,4 @@ content/
 zim/
 uploads/
 .DS_Store
+bin/kiwix-serve.bak-*
