@@ -27,7 +27,10 @@ export default function AdminDashboard() {
 
   return (
     <div>
-      <h1 className="mb-3">Dashboard</h1>
+      <div style={{ marginBottom: '1rem' }}>
+        <h1 className="mb-3">Dashboard</h1>
+        <small style={{ color: '#888', fontSize: '0.75rem' }}>v{import.meta.env.VITE_APP_VERSION}</small>
+      </div>
       <StorageInfo />
       <div className="stats-grid">
         <div className="stat-card">
