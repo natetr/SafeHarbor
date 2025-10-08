@@ -8,10 +8,38 @@ const DB_PATH = process.env.DATABASE_PATH || './safeharbor.db';
 // Ensure database directory exists
 const dbDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dbDir) && dbDir !== '.') {
-  fs.mkdirSync(dbDir, { recursive: true });
+  try {
+    fs.mkdirSync(dbDir, { recursive: true });
+  } catch (err) {
+    console.error('\n❌ Failed to create database directory:', dbDir);
+    console.error('Error:', err.message);
+    console.error('\nIf using /var/safeharbor/, you need to run the setup script first:');
+    console.error('  sudo ./scripts/setup.sh\n');
+    process.exit(1);
+  }
 }
 
-export const db = new Database(DB_PATH);
+// Create database connection with error handling
+let db;
+try {
+  db = new Database(DB_PATH);
+} catch (err) {
+  console.error('\n❌ Failed to open database:', DB_PATH);
+  console.error('Error:', err.message);
+
+  if (err.code === 'SQLITE_CANTOPEN') {
+    console.error('\nThis is likely a permissions issue.');
+    console.error('If using /var/safeharbor/, run the setup script:');
+    console.error('  sudo ./scripts/setup.sh');
+    console.error('\nOr check that the directory exists and is writable:');
+    console.error('  ls -la', dbDir);
+  }
+
+  console.error('');
+  process.exit(1);
+}
+
+export { db };
 
 // Enable foreign keys
 db.pragma('foreign_keys = ON');
