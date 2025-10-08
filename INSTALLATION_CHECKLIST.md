@@ -115,7 +115,10 @@ If automated installation fails:
 #### System Dependencies
 ```bash
 sudo apt-get update
-sudo apt-get install -y nodejs npm hostapd dnsmasq kiwix-tools sqlite3 git curl
+sudo apt-get install -y nodejs npm hostapd dnsmasq sqlite3 git curl
+# NOTE: Do NOT install kiwix-tools via apt-get
+# The install.sh script will download the correct version (3.7.0-2 with libzim 9.2.0+)
+# The apt version is outdated and has memory mapping bugs with large ZIM files
 ```
 
 #### Application Setup

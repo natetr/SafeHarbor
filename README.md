@@ -92,7 +92,11 @@ If you prefer to install manually:
 ```bash
 # Install system dependencies
 sudo apt-get update
-sudo apt-get install -y nodejs npm hostapd dnsmasq kiwix-tools sqlite3
+sudo apt-get install -y nodejs npm hostapd dnsmasq sqlite3
+
+# NOTE: kiwix-tools will be installed automatically by install.sh
+# with the correct version (3.7.0-2 with libzim 9.2.0+)
+# Do NOT use apt-get for kiwix-tools as it installs an older version
 
 # Install application
 cd safeharbor
@@ -375,6 +379,36 @@ sudo journalctl -u safeharbor -n 50
 2. Verify ZIM files exist: `ls /var/safeharbor/zim/`
 3. Check Kiwix logs in system journal
 4. Restart SafeHarbor: `sudo systemctl restart safeharbor`
+
+### Kiwix crashes with MMapException (large ZIM files)
+
+**Symptom**: Kiwix crashes immediately with `libc++abi: terminating due to uncaught exception of type zim::(anonymous namespace)::MMapException`
+
+**Cause**: Old libzim 9.1.0 has a memory mapping bug on macOS/Linux with files >2GB
+
+**Solution**: Ensure kiwix-tools 3.7.0-2 (with libzim 9.2.0+) is installed:
+
+```bash
+# Check libzim version
+kiwix-serve --version | grep libzim
+
+# Should show: libzim 9.2.0 or newer
+# If showing 9.1.0 or older, reinstall:
+
+cd /tmp
+curl -L -o kiwix-tools.tar.gz "https://download.kiwix.org/release/kiwix-tools/kiwix-tools_linux-aarch64-3.7.0-2.tar.gz"
+tar -xzf kiwix-tools.tar.gz
+sudo cp kiwix-tools_linux-aarch64-3.7.0-2/kiwix-* /usr/local/bin/
+sudo chmod +x /usr/local/bin/kiwix-*
+
+# Verify fix
+kiwix-serve --version
+
+# Restart SafeHarbor
+sudo systemctl restart safeharbor
+```
+
+**Note**: The automated install.sh script installs the correct version automatically.
 
 ### Out of space
 
