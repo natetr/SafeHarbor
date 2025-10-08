@@ -253,19 +253,29 @@ router.get('/', optionalAuth, async (req, res) => {
 
     // Don't send filepath to non-admin clients
     const sanitized = libraries.map(lib => {
-      // Extract filename without .zim extension for kiwix URL
+      // Extract filename without .zim extension for fallback
       const zimName = lib.filename.replace('.zim', '');
 
       // Find matching catalog entry
       const catalogEntry = catalog.find(c => c.name && zimName.startsWith(c.name));
+
+      // Use catalog's content path if available, otherwise construct from filename
+      let contentUrl;
+      if (catalogEntry?.contentPath) {
+        // Use authoritative URL from kiwix-serve catalog
+        contentUrl = `http://localhost:${KIWIX_PORT}${catalogEntry.contentPath}`;
+      } else {
+        // Fallback to filename-based construction
+        contentUrl = `http://localhost:${KIWIX_PORT}/content/${zimName}`;
+      }
 
       return {
         ...lib,
         filepath: isAdmin ? lib.filepath : undefined,
         // Override title with catalog title if available
         title: catalogEntry?.title || lib.title,
-        // Direct link to kiwix-serve content path
-        kiwixUrl: `http://localhost:${KIWIX_PORT}/content/${zimName}`,
+        // Use catalog URL or fallback to constructed URL
+        kiwixUrl: contentUrl,
         // Add metadata from catalog
         icon: catalogEntry?.icon || null,
         category: catalogEntry?.category || lib.category || null,
@@ -298,6 +308,10 @@ function parseCatalogXml(xml) {
       return match ? match[1] : null;
     };
 
+    // Extract content URL from <link type="text/html" href="..."> tag
+    const linkMatch = entry.match(/<link[^>]*type="text\/html"[^>]*href="([^"]*)"/);
+    const contentPath = linkMatch ? linkMatch[1] : null;
+
     entries.push({
       name: getTag('name'),
       title: getTag('title'),
@@ -305,6 +319,7 @@ function parseCatalogXml(xml) {
       category: getTag('category'),
       language: getTag('language'),
       icon: getAttr('link', 'href') || null,
+      contentPath: contentPath,  // Add the authoritative content path
       tags: (getTag('tags') || '').split(';').filter(t => t),
       updated: getTag('updated'),
       issued: getTag('issued')
