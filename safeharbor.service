@@ -1,0 +1,61 @@
+# SafeHarbor systemd Service Unit
+# This file enables SafeHarbor to start automatically on boot
+#
+# Installation:
+#   1. Copy this file to systemd directory:
+#      sudo cp safeharbor.service /etc/systemd/system/
+#
+#   2. Update the User, WorkingDirectory, and ExecStart paths below if needed
+#
+#   3. Enable and start the service:
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable safeharbor
+#      sudo systemctl start safeharbor
+#
+#   4. Check status:
+#      sudo systemctl status safeharbor
+#
+#   5. View logs:
+#      sudo journalctl -u safeharbor -f
+
+[Unit]
+Description=SafeHarbor - Offline Knowledge Hub
+Documentation=https://github.com/natetr/SafeHarbor
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# User and Group (change 'nate' to your username)
+User=nate
+Group=nate
+
+# Working directory (change to your installation path)
+WorkingDirectory=/home/nate/SafeHarbor
+
+# Start command (update path if Node.js is elsewhere)
+ExecStart=/usr/bin/node server/index.js
+
+# Environment
+Environment=NODE_ENV=production
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+# Resource limits (optional - adjust for your Raspberry Pi)
+# LimitNOFILE=65536
+# MemoryMax=1G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=safeharbor
+
+# Security hardening (optional)
+# NoNewPrivileges=true
+# PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
