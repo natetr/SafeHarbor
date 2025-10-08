@@ -1598,6 +1598,159 @@ router.get('/logs/stats', authenticateToken, requireAdmin, (req, res) => {
   }
 });
 
+// Export ZIM catalog as JSON file
+router.get('/export', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const libraries = db.prepare("SELECT * FROM zim_libraries WHERE status = 'active' ORDER BY title").all();
+
+    const exportData = {
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      zims: libraries.map(lib => ({
+        url: lib.url
+      })).filter(zim => zim.url) // Only include ZIMs with valid URLs
+    };
+
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="safeharbor-zims-${new Date().toISOString().split('T')[0]}.json"`);
+
+    res.json(exportData);
+  } catch (err) {
+    console.error('Error exporting ZIM catalog:', err);
+    res.status(500).json({ error: 'Failed to export ZIM catalog' });
+  }
+});
+
+// Import ZIM catalog from JSON file
+router.post('/import', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { zims } = req.body;
+
+    if (!Array.isArray(zims)) {
+      return res.status(400).json({ error: 'Invalid import format: zims array required' });
+    }
+
+    // Extract URLs
+    const urls = zims.map(z => z.url).filter(Boolean);
+
+    if (urls.length === 0) {
+      return res.status(400).json({ error: 'No valid ZIM URLs found in import file' });
+    }
+
+    // Fetch metadata from Kiwix catalog for each URL
+    const enrichedZims = [];
+
+    for (const url of urls) {
+      try {
+        const filename = path.basename(url);
+
+        // Parse filename to extract search term
+        const nameMatch = filename.match(/^(.+?)_\d{4}-\d{2}\.zim$/);
+        const baseName = nameMatch ? nameMatch[1] : filename.replace('.zim', '');
+
+        // Determine search term based on filename pattern
+        let searchTerm;
+        if (baseName.includes('.')) {
+          searchTerm = baseName.split('_')[0].split('.')[0];
+        } else if (baseName.startsWith('devdocs_')) {
+          const parts = baseName.split('_');
+          searchTerm = parts.length > 2 ? parts.slice(2).join(' ') : baseName;
+        } else {
+          searchTerm = baseName.split('_').slice(0, 2).join(' ');
+        }
+
+        // Query Kiwix catalog
+        const catalogUrl = `https://library.kiwix.org/catalog/v2/entries?count=50&q=${encodeURIComponent(searchTerm)}`;
+        const response = await axios.get(catalogUrl, { timeout: 15000 });
+        const xml = response.data;
+
+        // Parse XML to find matching entry
+        const entryMatches = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
+
+        let foundMatch = false;
+        for (const entry of entryMatches) {
+          const getTag = (tag) => {
+            const match = entry.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`));
+            return match ? match[1] : null;
+          };
+
+          const getAttr = (tag, attr) => {
+            const match = entry.match(new RegExp(`<${tag}[^>]*${attr}="([^"]*)"`));
+            return match ? match[1] : null;
+          };
+
+          const downloadMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/acquisition\/open-access"[^>]*href="([^"]*)"/);
+          let downloadUrl = downloadMatch ? downloadMatch[1] : null;
+
+          if (downloadUrl && downloadUrl.endsWith('.meta4')) {
+            downloadUrl = downloadUrl.replace('.zim.meta4', '.zim');
+          }
+
+          // Check if this entry matches our URL
+          if (downloadUrl === url) {
+            const sizeMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/acquisition\/open-access"[^>]*length="([^"]*)"/);
+            const size = sizeMatch ? parseInt(sizeMatch[1]) : null;
+
+            const contentMatch = entry.match(/<link[^>]*type="text\/html"[^>]*href="([^"]*)"/);
+            const contentPath = contentMatch ? contentMatch[1] : null;
+
+            enrichedZims.push({
+              id: getTag('id'),
+              name: getTag('name'),
+              title: getTag('title'),
+              description: getTag('summary'),
+              language: getTag('language'),
+              category: getTag('category'),
+              size: size,
+              articleCount: parseInt(getTag('articleCount')) || null,
+              mediaCount: parseInt(getTag('mediaCount')) || null,
+              url: downloadUrl,
+              icon: getAttr('link', 'href'),
+              contentPath: contentPath,
+              updated: getTag('updated')
+            });
+
+            foundMatch = true;
+            break;
+          }
+        }
+
+        // If no exact match found, add basic info
+        if (!foundMatch) {
+          enrichedZims.push({
+            name: baseName,
+            title: filename.replace('.zim', '').replace(/_/g, ' '),
+            url: url,
+            description: 'Metadata not found in catalog',
+            size: null,
+            language: null,
+            category: null
+          });
+        }
+      } catch (err) {
+        console.error(`Failed to fetch metadata for ${url}:`, err.message);
+        // Add basic entry even if catalog fetch fails
+        enrichedZims.push({
+          title: path.basename(url).replace('.zim', ''),
+          url: url,
+          description: 'Could not fetch metadata from catalog',
+          size: null
+        });
+      }
+    }
+
+    res.json({
+      message: 'Import processed successfully',
+      zims: enrichedZims,
+      total: enrichedZims.length
+    });
+  } catch (err) {
+    console.error('Error importing ZIM catalog:', err);
+    res.status(500).json({ error: 'Failed to import ZIM catalog: ' + err.message });
+  }
+});
+
 // Export startKiwixServer and restartKiwixServer so they can be called after DB init
 export { startKiwixServer, restartKiwixServer };
 

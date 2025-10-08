@@ -10,6 +10,7 @@ import AdminDashboard from './pages/admin/Dashboard';
 import AdminContent from './pages/admin/Content';
 import AdminZIM from './pages/admin/ZIM';
 import AdminZIMCatalog from './pages/admin/ZIMCatalog';
+import AdminZIMImport from './pages/admin/ZIMImport';
 import AdminZIMLogs from './pages/admin/ZIMLogs';
 import AdminNetwork from './pages/admin/Network';
 import AdminSystem from './pages/admin/System';
@@ -96,6 +97,7 @@ function App() {
           <Route path="content" element={<AdminContent />} />
           <Route path="zim" element={<AdminZIM />} />
           <Route path="zim/catalog" element={<AdminZIMCatalog />} />
+          <Route path="zim/import" element={<AdminZIMImport />} />
           <Route path="zim/logs" element={<AdminZIMLogs />} />
           <Route path="network" element={<AdminNetwork />} />
           <Route path="system" element={<AdminSystem />} />

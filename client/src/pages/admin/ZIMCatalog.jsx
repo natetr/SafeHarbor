@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
+import { formatSize } from '../../utils/formatSize';
 import StorageInfo from '../../components/StorageInfo';
 import Snackbar, { useSnackbar } from '../../components/Snackbar';
 
@@ -492,11 +493,4 @@ export default function ZIMCatalog() {
       <Snackbar />
     </div>
   );
-}
-
-function formatSize(bytes) {
-  if (!bytes) return 'Unknown';
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
 }
