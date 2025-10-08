@@ -20,6 +20,7 @@ const KIWIX_SERVE_PATH = process.env.KIWIX_SERVE_PATH || path.join(__dirname, '.
 let kiwixProcess = null;
 let kiwixStartTime = null;
 let lastAddedZimId = null; // Track the most recently added ZIM
+let isRestarting = false; // Track if we're intentionally restarting
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -125,8 +126,12 @@ function startKiwixServer() {
       const uptime = kiwixStartTime ? Math.round((Date.now() - kiwixStartTime) / 1000) : 0;
       console.log(`Kiwix server exited with code ${code} after ${uptime} seconds`);
 
-      // Detect crash - if Kiwix exits with non-zero code or crashes within 10 seconds
-      if ((code !== 0 && code !== null) || uptime < 10) {
+      // Detect crash - only quarantine on actual crashes, not intentional restarts
+      // A crash is: non-zero exit code within 5 seconds, or code 0 exit < 2 seconds (unless we're restarting)
+      const isActualCrash = (code !== 0 && code !== null && uptime < 5) ||
+                            (code === 0 && uptime < 2 && !isRestarting);
+
+      if (isActualCrash) {
         console.error('⚠️  Kiwix crashed! Attempting recovery...');
 
         let zimToQuarantine = null;
@@ -183,9 +188,16 @@ function startKiwixServer() {
         setTimeout(() => startKiwixServer(), 5000);
       }
 
+      // Clear restart flag once exit is handled
+      isRestarting = false;
       kiwixProcess = null;
       kiwixStartTime = null;
     });
+
+    // Successfully started - clear restart flag after a moment
+    setTimeout(() => {
+      isRestarting = false;
+    }, 3000);
 
     console.log(`Kiwix server started on port ${KIWIX_PORT}`);
   } catch (err) {
@@ -196,6 +208,9 @@ function startKiwixServer() {
 
 // Restart Kiwix server
 function restartKiwixServer() {
+  // Mark that we're intentionally restarting
+  isRestarting = true;
+
   // Kill the kiwixProcess if we have a reference
   if (kiwixProcess) {
     kiwixProcess.kill();
