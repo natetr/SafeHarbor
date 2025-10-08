@@ -1,8 +1,4 @@
 import dotenv from 'dotenv';
-
-// Load environment variables FIRST, before any other imports that might use them
-dotenv.config();
-
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -12,23 +8,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-// Import routes
-import authRoutes from './routes/auth.js';
-import contentRoutes from './routes/content.js';
-import zimRoutes, { startKiwixServer } from './routes/zim.js';
-import networkRoutes from './routes/network.js';
-import systemRoutes from './routes/system.js';
-import searchRoutes from './routes/search.js';
-import storageRoutes from './routes/storage.js';
-
-// Import database initialization
-import { initDatabase } from './database/init.js';
-
-// Import update scheduler
-import { startUpdateScheduler } from './services/updateScheduler.js';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Load environment variables FIRST, before any module that uses them
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -56,6 +40,20 @@ dirs.forEach(dir => {
   }
 });
 
+// Dynamically import modules that depend on environment variables
+// This ensures .env is loaded before these modules execute
+const { initDatabase } = await import('./database/init.js');
+const authRoutes = (await import('./routes/auth.js')).default;
+const contentRoutes = (await import('./routes/content.js')).default;
+const zimModule = await import('./routes/zim.js');
+const zimRoutes = zimModule.default;
+const { startKiwixServer } = zimModule;
+const networkRoutes = (await import('./routes/network.js')).default;
+const systemRoutes = (await import('./routes/system.js')).default;
+const searchRoutes = (await import('./routes/search.js')).default;
+const storageRoutes = (await import('./routes/storage.js')).default;
+const { startUpdateScheduler } = await import('./services/updateScheduler.js');
+
 // Initialize database
 initDatabase();
 
@@ -64,12 +62,9 @@ setTimeout(() => {
   startKiwixServer();
   // Start the update scheduler (pass restartKiwixServer callback from zim routes)
   startUpdateScheduler(() => {
-    // Import restartKiwixServer dynamically to avoid circular dependency
-    import('./routes/zim.js').then(module => {
-      if (module.restartKiwixServer) {
-        module.restartKiwixServer();
-      }
-    });
+    if (zimModule.restartKiwixServer) {
+      zimModule.restartKiwixServer();
+    }
   });
 }, 1000);
 
