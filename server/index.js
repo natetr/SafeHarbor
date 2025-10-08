@@ -1,9 +1,13 @@
+import dotenv from 'dotenv';
+
+// Load environment variables FIRST, before any other imports that might use them
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { rateLimit } from 'express-rate-limit';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -25,8 +29,6 @@ import { startUpdateScheduler } from './services/updateScheduler.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
