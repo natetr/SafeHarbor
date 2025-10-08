@@ -27,9 +27,10 @@ ARCH=$(uname -m)
 echo "System architecture: $ARCH"
 
 # Map architecture to kiwix-tools package name
+# Note: kiwix uses 'aarch64' in filenames, not 'arm64'
 case "$ARCH" in
     aarch64|arm64)
-        KIWIX_ARCH="arm64"
+        KIWIX_ARCH="aarch64"
         KIWIX_PACKAGE="kiwix-tools_linux-${KIWIX_ARCH}-${KIWIX_VERSION}.tar.gz"
         ;;
     armv7l|armv6l)
