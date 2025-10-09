@@ -1195,7 +1195,7 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
           url += `&q=${encodeURIComponent(searchTerm)}`;
         }
 
-        const response = await axios.get(url, { timeout: 15000 });
+        const response = await axios.get(url, { timeout: 30000 }); // Increased timeout for slower networks
         const xml = response.data;
 
         const entries = [];
@@ -1312,8 +1312,13 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
 
     res.json({ results, checkedAt: new Date().toISOString() });
   } catch (err) {
-    console.error('Update check error:', err);
-    res.status(500).json({ error: 'Failed to check for updates' });
+    console.error('❌ Update check error:', err);
+    console.error('Stack:', err.stack);
+    res.status(500).json({
+      error: 'Failed to check for updates',
+      details: err.message,
+      type: err.code || err.name
+    });
   }
 });
 
