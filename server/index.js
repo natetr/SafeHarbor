@@ -130,3 +130,16 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`SafeHarbor server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
+
+// Global error handlers to prevent server crashes
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  console.error('Stack:', err.stack);
+  // Don't exit - log and continue
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Promise Rejection at:', promise);
+  console.error('Reason:', reason);
+  // Don't exit - log and continue
+});
