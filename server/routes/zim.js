@@ -208,18 +208,25 @@ function startKiwixServer() {
 
 // Restart Kiwix server
 function restartKiwixServer() {
+  console.log('🔄 Initiating Kiwix server restart...');
+
   // Mark that we're intentionally restarting
   isRestarting = true;
 
   // Kill the kiwixProcess if we have a reference
   if (kiwixProcess) {
+    console.log('Killing existing Kiwix process...');
     kiwixProcess.kill();
     kiwixProcess = null;
   }
 
   // Wait longer before restarting to ensure process is fully terminated
   // Removed aggressive pkill that was killing newly-started processes
-  setTimeout(startKiwixServer, 3000);
+  console.log('Waiting 3 seconds before starting new Kiwix process...');
+  setTimeout(() => {
+    console.log('Starting new Kiwix server instance...');
+    startKiwixServer();
+  }, 3000);
 }
 
 // Get all ZIM libraries
@@ -564,16 +571,17 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
     response.data.pipe(writer);
 
     writer.on('finish', async () => {
-      const download = activeDownloads.get(filename);
-      const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
+      try {
+        const download = activeDownloads.get(filename);
+        const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
 
-      // Close the writer and wait for file system to flush
-      writer.close();
+        // Close the writer and wait for file system to flush
+        writer.close();
 
-      // Small delay to ensure OS has flushed all buffers to disk
-      await new Promise(resolve => setTimeout(resolve, 1000));
+        // Small delay to ensure OS has flushed all buffers to disk
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
-      activeDownloads.delete(filename);
+        activeDownloads.delete(filename);
 
       // Get file size from filesystem
       let fileSize = size || null;
@@ -638,11 +646,25 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       // Track this as the most recently added ZIM for crash detection
       lastAddedZimId = result.lastInsertRowid;
 
-      // Delay before restarting Kiwix to ensure file is ready
-      console.log(`ZIM download complete: ${filename}. Restarting Kiwix in 3 seconds...`);
-      setTimeout(() => {
-        restartKiwixServer();
-      }, 3000);
+        // Delay before restarting Kiwix to ensure file is ready
+        console.log(`ZIM download complete: ${filename}. Restarting Kiwix in 3 seconds...`);
+        setTimeout(() => {
+          console.log(`Now restarting Kiwix server to load ${filename}...`);
+          restartKiwixServer();
+        }, 3000);
+      } catch (err) {
+        console.error('Error in download finish handler:', err);
+        console.error('Stack:', err.stack);
+        activeDownloads.delete(filename);
+        // Clean up the file on error
+        if (filepath && fs.existsSync(filepath)) {
+          try {
+            fs.unlinkSync(filepath);
+          } catch (unlinkErr) {
+            console.error('Failed to clean up file after error:', unlinkErr);
+          }
+        }
+      }
     });
   } catch (err) {
     console.error('Download error:', err);
