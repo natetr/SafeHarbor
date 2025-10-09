@@ -251,6 +251,10 @@ router.get('/', optionalAuth, async (req, res) => {
       console.log('Could not fetch kiwix catalog metadata:', err.message);
     }
 
+    // Get hostname from request to build full kiwix URLs
+    const hostname = req.get('host').split(':')[0]; // Remove port if present
+    const kiwixBaseUrl = `http://${hostname}:${KIWIX_PORT}`;
+
     // Don't send filepath to non-admin clients
     const sanitized = libraries.map(lib => {
       // Extract filename without .zim extension for fallback
@@ -260,7 +264,6 @@ router.get('/', optionalAuth, async (req, res) => {
       const catalogEntry = catalog.find(c => c.name && zimName.startsWith(c.name));
 
       // Use catalog's content path if available, otherwise construct from filename
-      // Use relative path so it works when accessing from other devices
       let contentPath;
       if (catalogEntry?.contentPath) {
         // Use authoritative path from kiwix-serve catalog
@@ -269,17 +272,22 @@ router.get('/', optionalAuth, async (req, res) => {
         // Fallback to filename-based construction
         contentPath = `/content/${zimName}`;
       }
-      const contentUrl = contentPath;
+
+      // Build full URL pointing directly to kiwix-serve port
+      const contentUrl = `${kiwixBaseUrl}${contentPath}`;
+
+      // Build full icon URL if available
+      const iconUrl = catalogEntry?.icon ? `${kiwixBaseUrl}${catalogEntry.icon}` : null;
 
       return {
         ...lib,
         filepath: isAdmin ? lib.filepath : undefined,
         // Override title with catalog title if available
         title: catalogEntry?.title || lib.title,
-        // Use catalog URL or fallback to constructed URL
+        // Direct link to kiwix-serve (opens in new tab, no proxy needed)
         kiwixUrl: contentUrl,
-        // Add metadata from catalog
-        icon: catalogEntry?.icon || null,
+        // Add metadata from catalog with full icon URL
+        icon: iconUrl,
         category: catalogEntry?.category || lib.category || null,
         description: catalogEntry?.description || lib.description || null,
         language: catalogEntry?.language || lib.language || null,
