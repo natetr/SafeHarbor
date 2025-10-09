@@ -264,7 +264,7 @@ export default function GuestLibrary() {
               >
                 {zim.icon && (
                   <img
-                    src={`http://localhost:8080${zim.icon}`}
+                    src={zim.icon}
                     alt={zim.title}
                     style={{ width: '48px', height: '48px', flexShrink: 0, borderRadius: '4px' }}
                     onError={(e) => { e.target.style.display = 'none'; }}
