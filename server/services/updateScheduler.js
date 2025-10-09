@@ -411,21 +411,27 @@ async function runUpdateCheck(restartKiwixCallback) {
     console.log(`[Auto-Update] Checking ${libraries.length} ZIM(s) for updates...`);
 
     for (const library of libraries) {
-      console.log(`[Auto-Update] Checking ${library.title}...`);
-      const updateInfo = await checkZimForUpdate(library);
+      try {
+        console.log(`[Auto-Update] Checking ${library.title}...`);
+        const updateInfo = await checkZimForUpdate(library);
 
-      if (updateInfo && updateInfo.updateAvailable) {
-        console.log(`[Auto-Update] Update available for ${library.title}: ${updateInfo.currentVersion} -> ${updateInfo.latestVersion}`);
+        if (updateInfo && updateInfo.updateAvailable) {
+          console.log(`[Auto-Update] Update available for ${library.title}: ${updateInfo.currentVersion} -> ${updateInfo.latestVersion}`);
 
-        // If auto-download is enabled AND we're within the download window, download and install the update
-        if (settings && settings.auto_download_enabled && withinWindow) {
-          console.log(`[Auto-Update] Auto-downloading update for ${library.title}...`);
-          await downloadAndInstallUpdate(library, restartKiwixCallback);
-        } else if (settings && settings.auto_download_enabled && !withinWindow) {
-          console.log(`[Auto-Update] Update found but waiting for download window (${settings.download_start_hour}:00-${settings.download_end_hour}:00)`);
+          // If auto-download is enabled AND we're within the download window, download and install the update
+          if (settings && settings.auto_download_enabled && withinWindow) {
+            console.log(`[Auto-Update] Auto-downloading update for ${library.title}...`);
+            await downloadAndInstallUpdate(library, restartKiwixCallback);
+          } else if (settings && settings.auto_download_enabled && !withinWindow) {
+            console.log(`[Auto-Update] Update found but waiting for download window (${settings.download_start_hour}:00-${settings.download_end_hour}:00)`);
+          }
+        } else {
+          console.log(`[Auto-Update] ${library.title} is up to date.`);
         }
-      } else {
-        console.log(`[Auto-Update] ${library.title} is up to date.`);
+      } catch (err) {
+        console.error(`[Auto-Update] Error checking ${library.title}:`, err);
+        console.error('Stack:', err.stack);
+        // Continue with next library
       }
 
       // Add delay between checks to avoid overwhelming the server
@@ -454,6 +460,7 @@ export function startUpdateScheduler(restartKiwixCallback) {
     // For simplicity, we'll check every hour and determine if we should run based on last check time
     scheduledTask = cron.schedule('0 * * * *', async () => {
       try {
+        console.log('[Auto-Update Scheduler] Cron job triggered');
         const settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
         const intervalHours = settings?.check_interval_hours || 24;
 
@@ -469,10 +476,15 @@ export function startUpdateScheduler(restartKiwixCallback) {
 
         // If never checked, or if interval has passed, run the check
         if (!lastCheckedTime || (now - lastCheckedTime) >= (intervalHours * 60 * 60 * 1000)) {
+          console.log('[Auto-Update Scheduler] Running update check');
           await runUpdateCheck(restartKiwixCallback);
+          console.log('[Auto-Update Scheduler] Update check completed');
+        } else {
+          console.log('[Auto-Update Scheduler] Skipping - not time yet');
         }
       } catch (err) {
         console.error('[Auto-Update Scheduler] Error:', err);
+        console.error('Stack:', err.stack);
       }
     });
 
