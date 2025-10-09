@@ -41,8 +41,14 @@ try {
 
 export { db };
 
-// Enable foreign keys
-db.pragma('foreign_keys = ON');
+// Configure database for production use with concurrent access
+db.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
+db.pragma('busy_timeout = 5000'); // Wait up to 5 seconds for locks
+db.pragma('synchronous = NORMAL'); // Balance between safety and performance
+db.pragma('cache_size = -64000'); // 64MB cache for better performance
+db.pragma('foreign_keys = ON'); // Enable foreign key constraints
+
+console.log('Database configured with WAL mode and optimized settings');
 
 export function initDatabase() {
   // Users table

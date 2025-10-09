@@ -1,6 +1,6 @@
 {
   "name": "safeharbor",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "Offline knowledge and media hub for Raspberry Pi",
   "main": "server/index.js",
   "type": "module",
