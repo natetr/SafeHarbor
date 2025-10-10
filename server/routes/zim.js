@@ -397,13 +397,17 @@ function parseCatalogXml(xml) {
     const linkMatch = entry.match(/<link[^>]*type="text\/html"[^>]*href="([^"]*)"/);
     const contentPath = linkMatch ? linkMatch[1] : null;
 
+    // Extract icon URL specifically from <link rel="http://opds-spec.org/image" ...> tag
+    const iconMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/image[^"]*"[^>]*href="([^"]*)"/);
+    const iconPath = iconMatch ? iconMatch[1] : null;
+
     entries.push({
       name: getTag('name'),
       title: getTag('title'),
       description: getTag('summary'),
       category: getTag('category'),
       language: getTag('language'),
-      icon: getAttr('link', 'href') || null,
+      icon: iconPath,
       contentPath: contentPath,  // Add the authoritative content path
       tags: (getTag('tags') || '').split(';').filter(t => t),
       updated: getTag('updated'),
