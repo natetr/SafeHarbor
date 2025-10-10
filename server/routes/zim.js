@@ -244,18 +244,32 @@ router.get('/', optionalAuth, async (req, res) => {
 
     const libraries = db.prepare(query).all();
 
-    // Fetch metadata from kiwix catalog
+    // Fetch metadata from kiwix catalog with retry logic
+    // (kiwix-serve may be temporarily unavailable during restarts)
     let catalog = [];
     try {
-      const catalogResponse = await axios.get(`http://localhost:${KIWIX_PORT}/catalog/v2/entries`, {
-        timeout: 2000
-      });
+      let catalogResponse;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          catalogResponse = await axios.get(`http://localhost:${KIWIX_PORT}/catalog/v2/entries`, {
+            timeout: 2000
+          });
+          break; // Success
+        } catch (err) {
+          if (attempt < 3) {
+            console.log(`Catalog fetch attempt ${attempt}/3 failed: ${err.message}, retrying in ${attempt}s...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Exponential backoff
+          } else {
+            throw err; // Give up after 3 attempts
+          }
+        }
+      }
 
       // Parse XML to extract metadata
       const catalogXml = catalogResponse.data;
       catalog = parseCatalogXml(catalogXml);
     } catch (err) {
-      console.log('Could not fetch kiwix catalog metadata:', err.message);
+      console.log('Could not fetch kiwix catalog metadata after 3 attempts:', err.message);
     }
 
     // Get hostname from request to build full kiwix URLs
