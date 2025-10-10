@@ -578,6 +578,23 @@ export default function AdminZIM() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
           <h2 className="card-header" style={{ margin: 0 }}>Installed Libraries ({libraries.length})</h2>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            {updateCheckStatus && (
+              <span style={{
+                fontSize: '0.9rem',
+                color: updateCheckStatus.error ? '#dc3545' : updateCheckStatus.isRunning ? '#0d6efd' : '#198754',
+                marginRight: '0.5rem'
+              }}>
+                {updateCheckStatus.error ? (
+                  `Error: ${updateCheckStatus.error}`
+                ) : updateCheckStatus.isRunning ? (
+                  `Checking for updates... (${updateCheckStatus.progress}/${updateCheckStatus.total})`
+                ) : updateCheckStatus.updatesAvailable !== undefined ? (
+                  updateCheckStatus.updatesAvailable > 0
+                    ? `${updateCheckStatus.updatesAvailable} ZIM${updateCheckStatus.updatesAvailable === 1 ? '' : 's'} have updates`
+                    : 'All ZIMs are up to date'
+                ) : null}
+              </span>
+            )}
             <button
               onClick={() => navigate('/admin/zim/import')}
               className="btn btn-secondary"
@@ -598,22 +615,6 @@ export default function AdminZIM() {
             >
               Check for Updates
             </button>
-            {updateCheckStatus && (
-              <span style={{
-                fontSize: '0.9rem',
-                color: updateCheckStatus.error ? '#dc3545' : updateCheckStatus.isRunning ? '#0d6efd' : '#198754'
-              }}>
-                {updateCheckStatus.error ? (
-                  `Error: ${updateCheckStatus.error}`
-                ) : updateCheckStatus.isRunning ? (
-                  `Checking for updates... (${updateCheckStatus.progress}/${updateCheckStatus.total})`
-                ) : updateCheckStatus.updatesAvailable !== undefined ? (
-                  updateCheckStatus.updatesAvailable > 0
-                    ? `${updateCheckStatus.updatesAvailable} ZIM${updateCheckStatus.updatesAvailable === 1 ? '' : 's'} have updates`
-                    : 'All ZIMs are up to date'
-                ) : null}
-              </span>
-            )}
           </div>
         </div>
         {libraries.length === 0 ? (
