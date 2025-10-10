@@ -24,5 +24,6 @@ uploads/
 # OS files
 .DS_Store
 
-# Backup files
+# Kiwix binaries (architecture-specific, should not be committed)
+bin/kiwix-serve
 bin/kiwix-serve.bak-*
