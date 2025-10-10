@@ -14,6 +14,7 @@ export default function AdminZIM() {
   const [downloading, setDownloading] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [updateCheckStatus, setUpdateCheckStatus] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
   const [updatingZims, setUpdatingZims] = useState(new Set());
 
@@ -237,28 +238,77 @@ export default function AdminZIM() {
     setCheckingUpdates(true);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/zim/check-updates/all', {
+
+      // Start the update check
+      const startResponse = await fetch('/api/zim/check-updates/all', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        const updatesAvailable = data.results.filter(r => r.updateAvailable).length;
+      if (!startResponse.ok) {
+        alert('Failed to start update check');
+        setCheckingUpdates(false);
+        return;
+      }
 
+      const startData = await startResponse.json();
+
+      // If it returned results immediately (cached), handle that
+      if (startData.results && startData.cached) {
+        const updatesAvailable = startData.results.filter(r => r.updateAvailable).length;
         if (updatesAvailable > 0) {
           alert(`Found ${updatesAvailable} update(s) available!`);
         } else {
           alert('All ZIM libraries are up to date.');
         }
-
         fetchLibraries();
-      } else {
-        alert('Failed to check for updates');
+        setCheckingUpdates(false);
+        return;
       }
+
+      // Poll for status until complete
+      const pollStatus = async () => {
+        const statusResponse = await fetch('/api/zim/check-updates/status', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (statusResponse.ok) {
+          const status = await statusResponse.json();
+
+          // Update UI with progress
+          setUpdateCheckStatus(status);
+
+          if (!status.isRunning && status.completedAt) {
+            // Check is complete
+            const updatesAvailable = status.results.filter(r => r.updateAvailable).length;
+
+            if (updatesAvailable > 0) {
+              alert(`Found ${updatesAvailable} update(s) available!`);
+            } else {
+              alert('All ZIM libraries are up to date.');
+            }
+
+            fetchLibraries();
+            setCheckingUpdates(false);
+
+            // Clear status after a few seconds
+            setTimeout(() => setUpdateCheckStatus(null), 3000);
+          } else {
+            // Still running, poll again in 1 second
+            setTimeout(pollStatus, 1000);
+          }
+        } else {
+          console.error('Failed to get update check status');
+          setCheckingUpdates(false);
+          setUpdateCheckStatus(null);
+        }
+      };
+
+      // Start polling
+      setTimeout(pollStatus, 1000);
+
     } catch (err) {
       console.error('Update check failed:', err);
       alert('Update check failed: ' + err.message);
-    } finally {
       setCheckingUpdates(false);
     }
   };
@@ -530,7 +580,11 @@ export default function AdminZIM() {
               disabled={checkingUpdates || libraries.length === 0}
               className="btn btn-primary"
             >
-              {checkingUpdates ? 'Checking...' : 'Check for Updates'}
+              {checkingUpdates && updateCheckStatus
+                ? `Checking... (${updateCheckStatus.progress}/${updateCheckStatus.total})`
+                : checkingUpdates
+                ? 'Checking...'
+                : 'Check for Updates'}
             </button>
           </div>
         </div>
