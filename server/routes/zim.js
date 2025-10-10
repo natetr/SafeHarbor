@@ -23,6 +23,7 @@ let lastAddedZimId = null; // Track the most recently added ZIM
 let isRestarting = false; // Track if we're intentionally restarting
 let restartPending = false; // Track if a restart is queued
 let restartTimer = null; // Timer for debounced restart
+let isCheckingUpdates = false; // Prevent concurrent update checks
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -1222,9 +1223,21 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
 
 // Check for updates for all ZIMs
 router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, res) => {
+  // Prevent concurrent update checks
+  if (isCheckingUpdates) {
+    return res.status(429).json({
+      error: 'Update check already in progress',
+      message: 'Please wait for the current update check to complete'
+    });
+  }
+
+  isCheckingUpdates = true;
+  console.log('[Update Check] Starting update check for all ZIMs...');
+
   try {
     const libraries = db.prepare('SELECT * FROM zim_libraries').all();
     const results = [];
+    const dbUpdates = []; // Collect all DB updates to batch at the end
 
     for (const library of libraries) {
       try {
@@ -1324,12 +1337,18 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
 
         const now = new Date().toISOString();
         if (updateAvailable && latestEntry) {
-          db.prepare(`
-            UPDATE zim_libraries
-            SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
-                available_update_article_count = ?, available_update_media_count = ?
-            WHERE id = ?
-          `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, library.id);
+          // Queue database update instead of executing immediately
+          dbUpdates.push({
+            id: library.id,
+            now,
+            url: latestEntry.url,
+            version: latestEntry.version,
+            size: latestEntry.size,
+            updated: latestEntry.updated,
+            articleCount: latestEntry.articleCount,
+            mediaCount: latestEntry.mediaCount,
+            hasUpdate: true
+          });
 
           results.push({
             id: library.id,
@@ -1340,12 +1359,12 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
             updateSize: latestEntry.size
           });
         } else {
-          db.prepare(`
-            UPDATE zim_libraries
-            SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
-                available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
-            WHERE id = ?
-          `).run(now, library.id);
+          // Queue database update for no-update case
+          dbUpdates.push({
+            id: library.id,
+            now,
+            hasUpdate: false
+          });
 
           results.push({
             id: library.id,
@@ -1354,6 +1373,10 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
             currentVersion: parsed.version
           });
         }
+
+        // Add small delay between checks to reduce stress
+        await new Promise(resolve => setTimeout(resolve, 200));
+
       } catch (err) {
         console.error(`Failed to check updates for ${library.title}:`, err.message);
         results.push({
@@ -1364,8 +1387,46 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
       }
     }
 
+    // Now batch all database updates in a single transaction
+    console.log('[Update Check] Writing results to database...');
+    try {
+      const updateStmt = db.prepare(`
+        UPDATE zim_libraries
+        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
+            available_update_article_count = ?, available_update_media_count = ?
+        WHERE id = ?
+      `);
+
+      const clearStmt = db.prepare(`
+        UPDATE zim_libraries
+        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
+            available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
+        WHERE id = ?
+      `);
+
+      // Use transaction for all updates
+      const transaction = db.transaction((updates) => {
+        for (const update of updates) {
+          if (update.hasUpdate) {
+            updateStmt.run(update.now, update.url, update.version, update.size, update.updated, update.articleCount, update.mediaCount, update.id);
+          } else {
+            clearStmt.run(update.now, update.id);
+          }
+        }
+      });
+
+      transaction(dbUpdates);
+      console.log('[Update Check] Database updated successfully');
+    } catch (dbErr) {
+      console.error('[Update Check] Database update failed:', dbErr);
+      throw dbErr;
+    }
+
+    isCheckingUpdates = false;
+    console.log('[Update Check] Completed successfully');
     res.json({ results, checkedAt: new Date().toISOString() });
   } catch (err) {
+    isCheckingUpdates = false;
     console.error('❌ Update check error:', err);
     console.error('Stack:', err.stack);
     res.status(500).json({
