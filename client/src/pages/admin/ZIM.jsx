@@ -236,6 +236,8 @@ export default function AdminZIM() {
 
   const handleCheckUpdates = async () => {
     setCheckingUpdates(true);
+    setUpdateCheckStatus({ isRunning: true, progress: 0, total: 0, results: [] });
+
     try {
       const token = localStorage.getItem('token');
 
@@ -245,8 +247,9 @@ export default function AdminZIM() {
       });
 
       if (!startResponse.ok) {
-        alert('Failed to start update check');
+        setUpdateCheckStatus({ error: 'Failed to start update check', isRunning: false });
         setCheckingUpdates(false);
+        setTimeout(() => setUpdateCheckStatus(null), 5000);
         return;
       }
 
@@ -255,13 +258,16 @@ export default function AdminZIM() {
       // If it returned results immediately (cached), handle that
       if (startData.results && startData.cached) {
         const updatesAvailable = startData.results.filter(r => r.updateAvailable).length;
-        if (updatesAvailable > 0) {
-          alert(`Found ${updatesAvailable} update(s) available!`);
-        } else {
-          alert('All ZIM libraries are up to date.');
-        }
+        setUpdateCheckStatus({
+          isRunning: false,
+          completedAt: startData.checkedAt,
+          results: startData.results,
+          updatesAvailable
+        });
         fetchLibraries();
         setCheckingUpdates(false);
+        // Clear status after 10 seconds
+        setTimeout(() => setUpdateCheckStatus(null), 10000);
         return;
       }
 
@@ -279,27 +285,27 @@ export default function AdminZIM() {
 
           if (!status.isRunning && status.completedAt) {
             // Check is complete
-            const updatesAvailable = status.results.filter(r => r.updateAvailable).length;
+            const updatesAvailable = (status.results || []).filter(r => r.updateAvailable).length;
 
-            if (updatesAvailable > 0) {
-              alert(`Found ${updatesAvailable} update(s) available!`);
-            } else {
-              alert('All ZIM libraries are up to date.');
-            }
+            setUpdateCheckStatus({
+              ...status,
+              updatesAvailable
+            });
 
             fetchLibraries();
             setCheckingUpdates(false);
 
-            // Clear status after a few seconds
-            setTimeout(() => setUpdateCheckStatus(null), 3000);
+            // Clear status after 10 seconds
+            setTimeout(() => setUpdateCheckStatus(null), 10000);
           } else {
             // Still running, poll again in 1 second
             setTimeout(pollStatus, 1000);
           }
         } else {
           console.error('Failed to get update check status');
+          setUpdateCheckStatus({ error: 'Failed to get status', isRunning: false });
           setCheckingUpdates(false);
-          setUpdateCheckStatus(null);
+          setTimeout(() => setUpdateCheckStatus(null), 5000);
         }
       };
 
@@ -308,8 +314,9 @@ export default function AdminZIM() {
 
     } catch (err) {
       console.error('Update check failed:', err);
-      alert('Update check failed: ' + err.message);
+      setUpdateCheckStatus({ error: err.message, isRunning: false });
       setCheckingUpdates(false);
+      setTimeout(() => setUpdateCheckStatus(null), 5000);
     }
   };
 
@@ -561,7 +568,7 @@ export default function AdminZIM() {
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
           <h2 className="card-header" style={{ margin: 0 }}>Installed Libraries ({libraries.length})</h2>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <button
               onClick={() => navigate('/admin/zim/import')}
               className="btn btn-secondary"
@@ -580,12 +587,24 @@ export default function AdminZIM() {
               disabled={checkingUpdates || libraries.length === 0}
               className="btn btn-primary"
             >
-              {checkingUpdates && updateCheckStatus
-                ? `Checking... (${updateCheckStatus.progress}/${updateCheckStatus.total})`
-                : checkingUpdates
-                ? 'Checking...'
-                : 'Check for Updates'}
+              Check for Updates
             </button>
+            {updateCheckStatus && (
+              <span style={{
+                fontSize: '0.9rem',
+                color: updateCheckStatus.error ? '#dc3545' : updateCheckStatus.isRunning ? '#0d6efd' : '#198754'
+              }}>
+                {updateCheckStatus.error ? (
+                  `Error: ${updateCheckStatus.error}`
+                ) : updateCheckStatus.isRunning ? (
+                  `Checking for updates... (${updateCheckStatus.progress}/${updateCheckStatus.total})`
+                ) : updateCheckStatus.updatesAvailable !== undefined ? (
+                  updateCheckStatus.updatesAvailable > 0
+                    ? `${updateCheckStatus.updatesAvailable} ZIM${updateCheckStatus.updatesAvailable === 1 ? '' : 's'} have updates`
+                    : 'All ZIMs are up to date'
+                ) : null}
+              </span>
+            )}
           </div>
         </div>
         {libraries.length === 0 ? (
