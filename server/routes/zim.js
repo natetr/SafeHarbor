@@ -21,6 +21,8 @@ let kiwixProcess = null;
 let kiwixStartTime = null;
 let lastAddedZimId = null; // Track the most recently added ZIM
 let isRestarting = false; // Track if we're intentionally restarting
+let restartPending = false; // Track if a restart is queued
+let restartTimer = null; // Timer for debounced restart
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -206,10 +208,42 @@ function startKiwixServer() {
   }
 }
 
-// Restart Kiwix server
-function restartKiwixServer() {
-  console.log('🔄 Initiating Kiwix server restart...');
+// Debounced restart - waits for all downloads to complete and prevents overlapping restarts
+function scheduleKiwixRestart(reason = 'ZIM change') {
+  console.log(`🔄 Restart requested: ${reason}`);
 
+  // If already restarting, just note that another restart is pending
+  if (isRestarting) {
+    console.log('⏳ Restart already in progress, will restart again when complete');
+    restartPending = true;
+    return;
+  }
+
+  // Clear any existing restart timer
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+  }
+
+  // Check if any downloads are active
+  const activeCount = Array.from(activeDownloads.values())
+    .filter(d => d.status === 'downloading').length;
+
+  if (activeCount > 0) {
+    console.log(`⏳ Waiting for ${activeCount} active download(s) to complete before restart`);
+    restartPending = true;
+    // Check again in 5 seconds
+    restartTimer = setTimeout(() => scheduleKiwixRestart('pending restart check'), 5000);
+    return;
+  }
+
+  // No active downloads and not currently restarting - proceed
+  console.log('🔄 Executing Kiwix server restart...');
+  restartPending = false;
+  executeKiwixRestart();
+}
+
+// Actually perform the restart
+function executeKiwixRestart() {
   // Mark that we're intentionally restarting
   isRestarting = true;
 
@@ -220,13 +254,17 @@ function restartKiwixServer() {
     kiwixProcess = null;
   }
 
-  // Wait longer before restarting to ensure process is fully terminated
-  // Removed aggressive pkill that was killing newly-started processes
+  // Wait for process to fully terminate
   console.log('Waiting 3 seconds before starting new Kiwix process...');
   setTimeout(() => {
     console.log('Starting new Kiwix server instance...');
     startKiwixServer();
   }, 3000);
+}
+
+// Legacy function for backward compatibility
+function restartKiwixServer() {
+  scheduleKiwixRestart('manual restart');
 }
 
 // Get all ZIM libraries
@@ -665,12 +703,9 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       // Track this as the most recently added ZIM for crash detection
       lastAddedZimId = result.lastInsertRowid;
 
-        // Delay before restarting Kiwix to ensure file is ready
-        console.log(`ZIM download complete: ${filename}. Restarting Kiwix in 3 seconds...`);
-        setTimeout(() => {
-          console.log(`Now restarting Kiwix server to load ${filename}...`);
-          restartKiwixServer();
-        }, 3000);
+        // Schedule a restart - will wait for all downloads to complete
+        console.log(`ZIM download complete: ${filename}.`);
+        scheduleKiwixRestart(`load ${filename}`);
       } catch (err) {
         console.error('Error in download finish handler:', err);
         console.error('Stack:', err.stack);
