@@ -23,10 +23,20 @@ let lastAddedZimId = null; // Track the most recently added ZIM
 let isRestarting = false; // Track if we're intentionally restarting
 let restartPending = false; // Track if a restart is queued
 let restartTimer = null; // Timer for debounced restart
-let isCheckingUpdates = false; // Prevent concurrent update checks
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
+
+// Track update check status
+let updateCheckStatus = {
+  isRunning: false,
+  progress: 0,
+  total: 0,
+  results: [],
+  startedAt: null,
+  completedAt: null,
+  error: null
+};
 
 // Helper function to extract ZIM name and version from filename
 function parseZimFilename(filename) {
@@ -1221,48 +1231,36 @@ router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res
   }
 });
 
-// Check for updates for all ZIMs
-router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, res) => {
-  // Prevent concurrent update checks
-  if (isCheckingUpdates) {
-    return res.status(429).json({
-      error: 'Update check already in progress',
-      message: 'Please wait for the current update check to complete'
-    });
-  }
-
-  isCheckingUpdates = true;
-  console.log('[Update Check] Starting update check for all ZIMs...');
+// Background function to check updates for all ZIMs
+async function runUpdateCheckBackground() {
+  console.log('[Update Check] Starting background update check for all ZIMs...');
 
   try {
     const libraries = db.prepare('SELECT * FROM zim_libraries').all();
-    const results = [];
-    const dbUpdates = []; // Collect all DB updates to batch at the end
+    updateCheckStatus.total = libraries.length;
+    updateCheckStatus.progress = 0;
+    updateCheckStatus.results = [];
 
     for (const library of libraries) {
       try {
         const parsed = parseZimFilename(library.filename);
 
-        // Query Kiwix catalog - use catalog name tag for better matching
-        // The catalog <name> tag usually matches our parsed name (without version)
+        // Query Kiwix catalog
         let url = `https://library.kiwix.org/catalog/v2/entries?count=100`;
         if (parsed.name) {
-          // For domain-based names (e.g., pets.stackexchange.com_en_all), search for just the domain
-          // For DevDocs (e.g., devdocs_en_redux), search for the last part (topic name)
-          // For other names (e.g., wikipedia_ace_all_nopic), search for first two parts
           let searchTerm;
           if (parsed.name.includes('.')) {
-            searchTerm = parsed.name.split('_')[0].split('.')[0]; // "pets" from "pets.stackexchange.com_en_all"
+            searchTerm = parsed.name.split('_')[0].split('.')[0];
           } else if (parsed.name.startsWith('devdocs_')) {
             const parts = parsed.name.split('_');
-            searchTerm = parts.length > 2 ? parts.slice(2).join(' ') : parsed.name; // "redux" from "devdocs_en_redux"
+            searchTerm = parts.length > 2 ? parts.slice(2).join(' ') : parsed.name;
           } else {
-            searchTerm = parsed.name.split('_').slice(0, 2).join(' '); // "wikipedia ace" from "wikipedia_ace_all_nopic"
+            searchTerm = parsed.name.split('_').slice(0, 2).join(' ');
           }
           url += `&q=${encodeURIComponent(searchTerm)}`;
         }
 
-        const response = await axios.get(url, { timeout: 30000 }); // Increased timeout for slower networks
+        const response = await axios.get(url, { timeout: 30000 });
         const xml = response.data;
 
         const entries = [];
@@ -1301,12 +1299,11 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
           }
         });
 
-        // Find matching entry - match by filename similarity
+        // Find matching entry
         const libraryBase = library.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
         const matchingEntries = entries.filter(e => {
           if (!e.filename) return false;
           const catalogBase = e.filename.replace(/\_\d{4}-\d{2}\.zim$/, '').toLowerCase().replace(/_/g, '-');
-          // Exact match on base filename (with underscores converted to hyphens)
           return catalogBase === libraryBase;
         });
 
@@ -1314,7 +1311,6 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
         let latestEntry = null;
 
         for (const entry of matchingEntries) {
-          // Prefer date comparison if both have updated dates
           if (entry.updated && library.updated_date) {
             const entryDate = new Date(entry.updated);
             const libraryDate = new Date(library.updated_date);
@@ -1325,7 +1321,6 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
               }
             }
           } else if (entry.version && parsed.version) {
-            // Fallback to version comparison from filename
             if (entry.version > parsed.version) {
               if (!latestEntry || entry.version > latestEntry.version) {
                 latestEntry = entry;
@@ -1336,105 +1331,155 @@ router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, re
         }
 
         const now = new Date().toISOString();
-        if (updateAvailable && latestEntry) {
-          // Queue database update instead of executing immediately
-          dbUpdates.push({
-            id: library.id,
-            now,
-            url: latestEntry.url,
-            version: latestEntry.version,
-            size: latestEntry.size,
-            updated: latestEntry.updated,
-            articleCount: latestEntry.articleCount,
-            mediaCount: latestEntry.mediaCount,
-            hasUpdate: true
-          });
 
-          results.push({
+        // Update database immediately (one at a time to avoid contention)
+        try {
+          if (updateAvailable && latestEntry) {
+            db.prepare(`
+              UPDATE zim_libraries
+              SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
+                  available_update_article_count = ?, available_update_media_count = ?
+              WHERE id = ?
+            `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, library.id);
+
+            updateCheckStatus.results.push({
+              id: library.id,
+              title: library.title,
+              updateAvailable: true,
+              currentVersion: parsed.version,
+              latestVersion: latestEntry.version,
+              updateSize: latestEntry.size
+            });
+          } else {
+            db.prepare(`
+              UPDATE zim_libraries
+              SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
+                  available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
+              WHERE id = ?
+            `).run(now, library.id);
+
+            updateCheckStatus.results.push({
+              id: library.id,
+              title: library.title,
+              updateAvailable: false,
+              currentVersion: parsed.version
+            });
+          }
+        } catch (dbErr) {
+          console.error(`[Update Check] DB error for ${library.title}:`, dbErr.message);
+          updateCheckStatus.results.push({
             id: library.id,
             title: library.title,
-            updateAvailable: true,
-            currentVersion: parsed.version,
-            latestVersion: latestEntry.version,
-            updateSize: latestEntry.size
-          });
-        } else {
-          // Queue database update for no-update case
-          dbUpdates.push({
-            id: library.id,
-            now,
-            hasUpdate: false
-          });
-
-          results.push({
-            id: library.id,
-            title: library.title,
-            updateAvailable: false,
-            currentVersion: parsed.version
+            error: 'Database update failed'
           });
         }
 
-        // Add small delay between checks to reduce stress
-        await new Promise(resolve => setTimeout(resolve, 200));
+        updateCheckStatus.progress++;
+
+        // Longer delay to give database breathing room
+        await new Promise(resolve => setTimeout(resolve, 500));
 
       } catch (err) {
-        console.error(`Failed to check updates for ${library.title}:`, err.message);
-        results.push({
+        console.error(`[Update Check] Failed to check ${library.title}:`, err.message);
+        updateCheckStatus.results.push({
           id: library.id,
           title: library.title,
           error: err.message
         });
+        updateCheckStatus.progress++;
       }
     }
 
-    // Now batch all database updates in a single transaction
-    console.log('[Update Check] Writing results to database...');
-    try {
-      const updateStmt = db.prepare(`
-        UPDATE zim_libraries
-        SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
-            available_update_article_count = ?, available_update_media_count = ?
-        WHERE id = ?
-      `);
-
-      const clearStmt = db.prepare(`
-        UPDATE zim_libraries
-        SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
-            available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
-        WHERE id = ?
-      `);
-
-      // Use transaction for all updates
-      const transaction = db.transaction((updates) => {
-        for (const update of updates) {
-          if (update.hasUpdate) {
-            updateStmt.run(update.now, update.url, update.version, update.size, update.updated, update.articleCount, update.mediaCount, update.id);
-          } else {
-            clearStmt.run(update.now, update.id);
-          }
-        }
-      });
-
-      transaction(dbUpdates);
-      console.log('[Update Check] Database updated successfully');
-    } catch (dbErr) {
-      console.error('[Update Check] Database update failed:', dbErr);
-      throw dbErr;
-    }
-
-    isCheckingUpdates = false;
+    updateCheckStatus.isRunning = false;
+    updateCheckStatus.completedAt = new Date().toISOString();
     console.log('[Update Check] Completed successfully');
-    res.json({ results, checkedAt: new Date().toISOString() });
   } catch (err) {
-    isCheckingUpdates = false;
     console.error('❌ Update check error:', err);
-    console.error('Stack:', err.stack);
-    res.status(500).json({
-      error: 'Failed to check for updates',
-      details: err.message,
-      type: err.code || err.name
+    updateCheckStatus.isRunning = false;
+    updateCheckStatus.error = err.message;
+    updateCheckStatus.completedAt = new Date().toISOString();
+  }
+}
+
+// Start update check (returns immediately, runs in background)
+router.post('/check-updates/start', authenticateToken, requireAdmin, async (req, res) => {
+  if (updateCheckStatus.isRunning) {
+    return res.status(429).json({
+      error: 'Update check already in progress',
+      message: 'Please wait for the current update check to complete',
+      status: updateCheckStatus
     });
   }
+
+  // Reset status
+  updateCheckStatus = {
+    isRunning: true,
+    progress: 0,
+    total: 0,
+    results: [],
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    error: null
+  };
+
+  // Start background check (don't await)
+  runUpdateCheckBackground().catch(err => {
+    console.error('[Update Check] Background task error:', err);
+  });
+
+  res.json({
+    message: 'Update check started',
+    status: updateCheckStatus
+  });
+});
+
+// Get update check status
+router.get('/check-updates/status', authenticateToken, requireAdmin, (req, res) => {
+  res.json(updateCheckStatus);
+});
+
+// Legacy endpoint - now redirects to start the async check
+router.get('/check-updates/all', authenticateToken, requireAdmin, async (req, res) => {
+  // If already running, return status
+  if (updateCheckStatus.isRunning) {
+    return res.json({
+      message: 'Update check in progress',
+      status: updateCheckStatus
+    });
+  }
+
+  // If recently completed (within last 30 seconds), return cached results
+  if (updateCheckStatus.completedAt) {
+    const completedTime = new Date(updateCheckStatus.completedAt).getTime();
+    const now = Date.now();
+    if (now - completedTime < 30000) {
+      return res.json({
+        results: updateCheckStatus.results,
+        checkedAt: updateCheckStatus.completedAt,
+        cached: true
+      });
+    }
+  }
+
+  // Start new check
+  updateCheckStatus = {
+    isRunning: true,
+    progress: 0,
+    total: 0,
+    results: [],
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    error: null
+  };
+
+  runUpdateCheckBackground().catch(err => {
+    console.error('[Update Check] Background task error:', err);
+  });
+
+  res.json({
+    message: 'Update check started',
+    status: updateCheckStatus
+  });
 });
 
 // Update a ZIM library
