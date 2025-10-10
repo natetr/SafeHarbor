@@ -22,14 +22,23 @@ export default function AdminZIM() {
     fetchLibraries();
     fetchDownloadProgress();
     fetchStorageInfo();
+  }, []);
 
-    // Poll for download progress every 2 seconds if there are active downloads
+  // Separate effect for polling - only when there are active downloads or updates
+  useEffect(() => {
+    if (activeDownloads.length === 0 && updatingZims.size === 0) {
+      // No active operations, don't poll
+      return;
+    }
+
+    // Poll for download progress every 3 seconds while downloads are active
+    // (increased from 2s to reduce database load)
     const interval = setInterval(() => {
       fetchDownloadProgress();
-    }, 2000);
+    }, 3000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [activeDownloads.length, updatingZims.size]);
 
   const fetchLibraries = async () => {
     try {
