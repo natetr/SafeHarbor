@@ -39,16 +39,61 @@ try {
   process.exit(1);
 }
 
+// Safe database wrapper that queues operations to prevent crashes
+export function safeDbRun(query, params = []) {
+  try {
+    const stmt = db.prepare(query);
+    return stmt.run(...params);
+  } catch (err) {
+    console.error('Database error:', err.message);
+    console.error('Query:', query);
+    throw err;
+  }
+}
+
+export function safeDbGet(query, params = []) {
+  try {
+    const stmt = db.prepare(query);
+    return stmt.get(...params);
+  } catch (err) {
+    console.error('Database error:', err.message);
+    console.error('Query:', query);
+    throw err;
+  }
+}
+
+export function safeDbAll(query, params = []) {
+  try {
+    const stmt = db.prepare(query);
+    return stmt.all(...params);
+  } catch (err) {
+    console.error('Database error:', err.message);
+    console.error('Query:', query);
+    throw err;
+  }
+}
+
 export { db };
 
 // Configure database for production use with concurrent access
 db.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
-db.pragma('busy_timeout = 5000'); // Wait up to 5 seconds for locks
+db.pragma('busy_timeout = 30000'); // Wait up to 30 seconds for locks (increased from 5s)
 db.pragma('synchronous = NORMAL'); // Balance between safety and performance
 db.pragma('cache_size = -64000'); // 64MB cache for better performance
 db.pragma('foreign_keys = ON'); // Enable foreign key constraints
+db.pragma('wal_autocheckpoint = 100'); // Checkpoint every 100 pages to prevent WAL from growing too large
+db.pragma('temp_store = MEMORY'); // Store temp tables in memory for better performance
 
 console.log('Database configured with WAL mode and optimized settings');
+
+// Periodic WAL checkpoint to prevent unbounded growth
+setInterval(() => {
+  try {
+    db.pragma('wal_checkpoint(PASSIVE)');
+  } catch (err) {
+    console.error('WAL checkpoint error:', err.message);
+  }
+}, 60000); // Every minute
 
 export function initDatabase() {
   // Users table
