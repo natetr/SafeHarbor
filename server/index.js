@@ -82,6 +82,22 @@ const limiter = rateLimit({
 
 app.use('/api/', limiter);
 
+// Request logging middleware for debugging
+app.use((req, res, next) => {
+  const start = Date.now();
+  const reqInfo = `${req.method} ${req.path}`;
+
+  // Log response when finished
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const status = res.statusCode;
+    const statusEmoji = status >= 500 ? '❌' : status >= 400 ? '⚠️' : '✓';
+    console.log(`${statusEmoji} ${reqInfo} - ${status} (${duration}ms)`);
+  });
+
+  next();
+});
+
 // Body parsing middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -96,6 +112,50 @@ app.use(cors({
 }));
 
 // API Routes
+// Health check endpoint
+app.get('/api/health', async (req, res) => {
+  try {
+    const health = {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      database: 'unknown',
+      kiwix: 'unknown'
+    };
+
+    // Check database
+    try {
+      const { db } = await import('./database/init.js');
+      const result = db.prepare('SELECT 1 as test').get();
+      health.database = result?.test === 1 ? 'connected' : 'error';
+    } catch (dbErr) {
+      health.database = 'error';
+      health.databaseError = dbErr.message;
+      health.status = 'degraded';
+    }
+
+    // Check kiwix
+    try {
+      const axios = (await import('axios')).default;
+      const KIWIX_PORT = process.env.KIWIX_PORT || 8080;
+      await axios.get(`http://localhost:${KIWIX_PORT}/catalog/v2/entries`, { timeout: 2000 });
+      health.kiwix = 'running';
+    } catch (kiwixErr) {
+      health.kiwix = 'not responding';
+      health.status = 'degraded';
+    }
+
+    const statusCode = health.status === 'ok' ? 200 : 503;
+    res.status(statusCode).json(health);
+  } catch (err) {
+    res.status(500).json({
+      status: 'error',
+      error: err.message
+    });
+  }
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/zim', zimRoutes);
@@ -130,6 +190,31 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`SafeHarbor server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
+
+// Periodic health monitoring
+setInterval(async () => {
+  try {
+    const { db } = await import('./database/init.js');
+
+    // Test database connection
+    const result = db.prepare('SELECT 1 as test').get();
+    if (result?.test !== 1) {
+      console.error('⚠️  Database health check failed - query returned unexpected result');
+    }
+
+    // Log memory if getting high
+    const mem = process.memoryUsage();
+    const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
+    const heapTotalMB = Math.round(mem.heapTotal / 1024 / 1024);
+
+    if (heapUsedMB > 500) {
+      console.warn(`⚠️  High memory usage: ${heapUsedMB}MB / ${heapTotalMB}MB`);
+    }
+  } catch (err) {
+    console.error('❌ Health check error:', err.message);
+    console.error('Stack:', err.stack);
+  }
+}, 30000); // Check every 30 seconds
 
 // Global error handlers to prevent server crashes
 process.on('uncaughtException', (err) => {
