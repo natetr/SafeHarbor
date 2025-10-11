@@ -97,7 +97,7 @@ async function logZimActivity(action, options = {}) {
 }
 
 // Start Kiwix server
-function startKiwixServer() {
+async function startKiwixServer() {
   if (kiwixProcess) {
     zimLogger.kiwix.verbose('Kiwix server already running - skipping start');
     return;
@@ -106,8 +106,8 @@ function startKiwixServer() {
   let zimFiles;
   try {
     zimLogger.kiwix.detail('Loading active ZIM files from database');
-    // Only load ZIMs with status='active'
-    zimFiles = db.prepare("SELECT id, filepath, filename, title FROM zim_libraries WHERE status = 'active'").all();
+    // CRITICAL: Use queued database read to prevent race conditions
+    zimFiles = await safeDbAll("SELECT id, filepath, filename, title FROM zim_libraries WHERE status = 'active'", []);
 
     if (zimFiles.length === 0) {
       zimLogger.kiwix.warn('No active ZIM files to serve - Kiwix server will not start');
@@ -195,7 +195,8 @@ function startKiwixServer() {
         // Strategy 1: If we recently added a ZIM, it's likely the culprit
         if (lastAddedZimId) {
           zimLogger.kiwix.detail('Checking recently added ZIM as crash suspect', { lastAddedZimId });
-          const recentZim = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(lastAddedZimId);
+          // CRITICAL: Use queued database read
+          const recentZim = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [lastAddedZimId]);
           if (recentZim && recentZim.status === 'active') {
             zimToQuarantine = recentZim;
             zimLogger.kiwix.warn(`Crash suspect identified: Recently added ZIM`, {
@@ -210,7 +211,8 @@ function startKiwixServer() {
         // Strategy 2: If no recent ZIM, find the most recently created active ZIM
         if (!zimToQuarantine) {
           zimLogger.kiwix.detail('No recently added ZIM - checking newest active ZIM');
-          const newestZim = db.prepare("SELECT * FROM zim_libraries WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").get();
+          // CRITICAL: Use queued database read
+          const newestZim = await safeDbGet("SELECT * FROM zim_libraries WHERE status = 'active' ORDER BY created_at DESC LIMIT 1", []);
           if (newestZim) {
             zimToQuarantine = newestZim;
             zimLogger.kiwix.warn(`Crash suspect identified: Newest active ZIM`, {
@@ -241,14 +243,14 @@ function startKiwixServer() {
             // Only quarantine if this ZIM has crashed 2+ times
             // This prevents false positives from temporary issues
             if (crashRecord.count >= 2) {
-              console.error(`⚠️  Quarantining problematic ZIM after ${crashRecord.count} crashes: ${zimToQuarantine.title || zimToQuarantine.filename}`);
+              zimLogger.kiwix.warn(`Quarantining problematic ZIM after ${crashRecord.count} crashes: ${zimToQuarantine.title || zimToQuarantine.filename}`);
 
-              // Quarantine the ZIM
-              db.prepare("UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?")
-                .run(`Kiwix crashed ${crashRecord.count} times when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`, zimToQuarantine.id);
+              // Quarantine the ZIM - CRITICAL: Use queued database write
+              await safeDbRun("UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?",
+                [`Kiwix crashed ${crashRecord.count} times when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`, zimToQuarantine.id]);
 
-              // Log the quarantine
-              logZimActivity('zim_quarantined', {
+              // Log the quarantine - wait for completion
+              await logZimActivity('zim_quarantined', {
                 zimTitle: zimToQuarantine.title,
                 zimFilename: zimToQuarantine.filename,
                 zimId: zimToQuarantine.id,
@@ -343,11 +345,16 @@ function executeKiwixRestart() {
     kiwixProcess = null;
   }
 
-  // Wait for process to fully terminate
+  // Wait for process to fully terminate, THEN wait for database queue to flush
   console.log('Waiting 3 seconds before starting new Kiwix process...');
-  setTimeout(() => {
+  setTimeout(async () => {
+    // CRITICAL: Add delay for database queue to flush before reading ZIM list
+    console.log('Waiting 500ms for database queue to flush...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+
     console.log('Starting new Kiwix server instance...');
-    startKiwixServer();
+    // CRITICAL: Await async function
+    await startKiwixServer();
   }, 3000);
 }
 
@@ -1050,16 +1057,31 @@ router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => 
 });
 
 // Delete ZIM library
-router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
+router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
+  const operationId = `zim-delete-${req.params.id}-${Date.now()}`;
+
   try {
-    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+    startOperation(operationId, 'delete', { zimId: req.params.id });
+    zimLogger.file.detail('Starting ZIM deletion', { zimId: req.params.id });
+
+    // Use queued database read
+    const library = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [req.params.id]);
 
     if (!library) {
+      zimLogger.file.warn('ZIM not found for deletion', { zimId: req.params.id });
+      endOperation(operationId, false);
       return res.status(404).json({ error: 'ZIM library not found' });
     }
 
+    zimLogger.file.detail('ZIM found - proceeding with deletion', {
+      zimId: library.id,
+      title: library.title,
+      filename: library.filename
+    });
+
     // Log deletion BEFORE deleting from database (so foreign key is still valid)
-    logZimActivity('zim_deleted', {
+    // CRITICAL: Wait for log to complete before proceeding
+    await logZimActivity('zim_deleted', {
       zimTitle: library.title,
       zimFilename: library.filename,
       zimId: library.id,
@@ -1068,23 +1090,42 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
       status: 'success'
     });
 
+    zimLogger.file.verbose('Deletion log written to database', { zimId: library.id });
+
     // Delete file from filesystem
     if (fs.existsSync(library.filepath)) {
+      zimLogger.file.detail('Deleting ZIM file from filesystem', { filepath: library.filepath });
       fs.unlinkSync(library.filepath);
+      zimLogger.file.verbose('Filesystem file deleted', { filepath: library.filepath });
+    } else {
+      zimLogger.file.warn('ZIM file not found on filesystem', { filepath: library.filepath });
     }
 
-    // Delete from database
-    db.prepare('DELETE FROM zim_libraries WHERE id = ?').run(req.params.id);
+    // Delete from database using queued operation
+    // CRITICAL: Wait for database delete to complete
+    zimLogger.file.detail('Deleting ZIM record from database', { zimId: req.params.id });
+    await safeDbRun('DELETE FROM zim_libraries WHERE id = ?', [req.params.id]);
+    zimLogger.file.verbose('Database record deleted', { zimId: req.params.id });
+
+    // CRITICAL: Add delay to ensure all queued operations complete before restart
+    zimLogger.file.detail('Waiting 500ms for database queue to flush before restart');
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     // Restart Kiwix server
+    zimLogger.file.info(`ZIM deleted successfully: ${library.title} - scheduling restart`, { zimId: req.params.id });
     restartKiwixServer();
 
+    endOperation(operationId, true);
     res.json({ message: 'ZIM library deleted successfully' });
   } catch (err) {
-    console.error('Delete error:', err);
+    zimLogger.file.error('Delete ZIM failed', {
+      zimId: req.params.id,
+      error: err.message,
+      stack: err.stack
+    });
 
     // Log deletion failure
-    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+    const library = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [req.params.id]);
     if (library) {
       logZimActivity('zim_delete_failed', {
         zimTitle: library.title,
@@ -1097,16 +1138,18 @@ router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
       });
     }
 
+    endOperation(operationId, false);
     res.status(500).json({ error: 'Failed to delete ZIM library' });
   }
 });
 
 // Update ZIM library metadata
-router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
+router.patch('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { title, description, hidden, status, error_message } = req.body;
 
-    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+    // Use queued database read
+    const library = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [req.params.id]);
     if (!library) {
       return res.status(404).json({ error: 'ZIM library not found' });
     }
@@ -1145,10 +1188,11 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
 
     if (updates.length > 0) {
       params.push(req.params.id);
-      db.prepare(`UPDATE zim_libraries SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+      // CRITICAL: Use queued database write
+      await safeDbRun(`UPDATE zim_libraries SET ${updates.join(', ')} WHERE id = ?`, params);
 
-      // Log metadata update
-      logZimActivity('metadata_updated', {
+      // Log metadata update - wait for completion
+      await logZimActivity('metadata_updated', {
         zimTitle: library.title,
         zimFilename: library.filename,
         zimId: library.id,
@@ -1159,7 +1203,9 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
 
       // If status changed to 'active', restart Kiwix to load the ZIM
       if (status === 'active' && library.status !== 'active') {
-        console.log(`Reactivating ZIM: ${library.title}`);
+        zimLogger.file.info(`Reactivating ZIM: ${library.title} - scheduling restart`);
+        // CRITICAL: Add delay before restart
+        await new Promise(resolve => setTimeout(resolve, 500));
         restartKiwixServer();
       }
     }
