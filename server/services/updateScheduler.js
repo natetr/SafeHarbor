@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import si from 'systeminformation';
 import { fileURLToPath } from 'url';
+import { zimLogger, startOperation, endOperation } from '../utils/zimLogger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -387,13 +388,18 @@ function isWithinDownloadWindow(settings) {
 
 // Main update check job
 async function runUpdateCheck(restartKiwixCallback) {
+  const operationId = `auto-update-check-${Date.now()}`;
+
   try {
-    console.log('[Auto-Update] Running scheduled update check...');
+    startOperation(operationId, 'auto-update', { timestamp: new Date().toISOString() });
+    zimLogger.autoUpdate.info('Running scheduled update check');
 
     const settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
 
     if (!settings || !settings.auto_download_enabled) {
-      console.log('[Auto-Update] Auto-download is disabled. Checking for updates only.');
+      zimLogger.autoUpdate.detail('Auto-download is disabled - checking for updates only', {
+        autoDownloadEnabled: settings?.auto_download_enabled || false
+      });
     }
 
     // Check if we're within the download time window
@@ -401,51 +407,83 @@ async function runUpdateCheck(restartKiwixCallback) {
     if (settings && settings.auto_download_enabled && !withinWindow) {
       const startHour = settings.download_start_hour || 0;
       const endHour = settings.download_end_hour || 23;
-      console.log(`[Auto-Update] Outside download window (${startHour}:00-${endHour}:00). Will check for updates but not download.`);
+      zimLogger.autoUpdate.detail('Outside download window - will check but not download', {
+        currentHour: new Date().getHours(),
+        windowStart: startHour,
+        windowEnd: endHour
+      });
     }
 
     // Get all ZIM libraries with auto-update enabled
+    zimLogger.autoUpdate.verbose('Querying ZIM libraries with auto-update enabled');
     const libraries = db.prepare('SELECT * FROM zim_libraries WHERE auto_update_enabled = 1').all();
 
     if (libraries.length === 0) {
-      console.log('[Auto-Update] No ZIM libraries have auto-update enabled.');
+      zimLogger.autoUpdate.info('No ZIM libraries have auto-update enabled');
+      endOperation(operationId, true);
       return;
     }
 
-    console.log(`[Auto-Update] Checking ${libraries.length} ZIM(s) for updates...`);
+    zimLogger.autoUpdate.info(`Checking ${libraries.length} ZIM(s) for updates`, {
+      count: libraries.length,
+      withinDownloadWindow: withinWindow
+    });
 
     for (const library of libraries) {
       try {
-        console.log(`[Auto-Update] Checking ${library.title}...`);
+        zimLogger.autoUpdate.detail(`Checking for updates: ${library.title}`, {
+          zimId: library.id,
+          currentVersion: library.updated_date || 'unknown'
+        });
         const updateInfo = await checkZimForUpdate(library);
 
         if (updateInfo && updateInfo.updateAvailable) {
-          console.log(`[Auto-Update] Update available for ${library.title}: ${updateInfo.currentVersion} -> ${updateInfo.latestVersion}`);
+          zimLogger.autoUpdate.success(`Update available for ${library.title}`, {
+            zimId: library.id,
+            currentVersion: updateInfo.currentVersion,
+            latestVersion: updateInfo.latestVersion,
+            updateSize: updateInfo.updateSize ? `${(updateInfo.updateSize / 1024 / 1024 / 1024).toFixed(2)}GB` : 'Unknown'
+          });
 
           // If auto-download is enabled AND we're within the download window, download and install the update
           if (settings && settings.auto_download_enabled && withinWindow) {
-            console.log(`[Auto-Update] Auto-downloading update for ${library.title}...`);
+            zimLogger.autoUpdate.info(`Auto-downloading update for ${library.title}`, {
+              zimId: library.id,
+              from: updateInfo.currentVersion,
+              to: updateInfo.latestVersion
+            });
             await downloadAndInstallUpdate(library, restartKiwixCallback);
           } else if (settings && settings.auto_download_enabled && !withinWindow) {
-            console.log(`[Auto-Update] Update found but waiting for download window (${settings.download_start_hour}:00-${settings.download_end_hour}:00)`);
+            zimLogger.autoUpdate.detail(`Update found but waiting for download window`, {
+              zimId: library.id,
+              zimTitle: library.title,
+              windowStart: `${settings.download_start_hour}:00`,
+              windowEnd: `${settings.download_end_hour}:00`
+            });
           }
         } else {
-          console.log(`[Auto-Update] ${library.title} is up to date.`);
+          zimLogger.autoUpdate.verbose(`${library.title} is up to date`, { zimId: library.id });
         }
       } catch (err) {
-        console.error(`[Auto-Update] Error checking ${library.title}:`, err);
-        console.error('Stack:', err.stack);
+        zimLogger.autoUpdate.error(`Error checking ${library.title}`, {
+          zimId: library.id,
+          error: err.message,
+          stack: err.stack
+        });
         // Continue with next library
       }
 
       // Add delay between checks to avoid overwhelming the server and database
       // Increased to 5 seconds to reduce database contention
+      zimLogger.autoUpdate.verbose('Waiting 5s before next ZIM check (database contention prevention)');
       await new Promise(resolve => setTimeout(resolve, 5000));
     }
 
-    console.log('[Auto-Update] Update check complete.');
+    zimLogger.autoUpdate.success('Update check complete', { checkedCount: libraries.length });
+    endOperation(operationId, true);
   } catch (err) {
-    console.error('[Auto-Update] Error during update check:', err);
+    zimLogger.autoUpdate.error('Error during update check', { error: err.message, stack: err.stack });
+    endOperation(operationId, false);
   }
 }
 
