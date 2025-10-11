@@ -31,11 +31,11 @@ export default function AdminZIM() {
       return;
     }
 
-    // Poll for download progress every 3 seconds while downloads are active
-    // (increased from 2s to reduce database load)
+    // Poll for download progress every 10 seconds while downloads are active
+    // (increased from 3s to significantly reduce database load)
     const interval = setInterval(() => {
       fetchDownloadProgress();
-    }, 3000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [activeDownloads.length, updatingZims.size]);
@@ -74,11 +74,19 @@ export default function AdminZIM() {
       });
       const data = await response.json();
 
+      // Check if download count changed significantly
+      const prevDownloadCount = activeDownloads.length;
       setActiveDownloads(data);
 
-      // Refresh library list periodically to check for update completion
-      // (fetchLibraries will reload the page if an update completed)
-      if (updatingZims.size > 0 || data.length > 0) {
+      // CRITICAL FIX: Only refresh library list when downloads COMPLETE, not on every poll
+      // This was causing excessive database queries (nested polling)
+      if (prevDownloadCount > 0 && data.length === 0) {
+        // Downloads just completed - refresh library list once
+        console.log('Downloads completed, refreshing library list');
+        fetchLibraries();
+      }
+      // For updating ZIMs, check completion less frequently (every 4th poll = ~40 seconds)
+      else if (updatingZims.size > 0 && Math.random() < 0.25) {
         fetchLibraries();
       }
     } catch (err) {

@@ -121,18 +121,38 @@ app.get('/api/health', async (req, res) => {
       uptime: process.uptime(),
       memory: process.memoryUsage(),
       database: 'unknown',
-      kiwix: 'unknown'
+      kiwix: 'unknown',
+      databaseQueue: null
     };
 
     // Check database
     try {
-      const { db } = await import('./database/init.js');
+      const { db, dbQueue } = await import('./database/init.js');
       const result = db.prepare('SELECT 1 as test').get();
       health.database = result?.test === 1 ? 'connected' : 'error';
+
+      // Add database queue statistics
+      health.databaseQueue = (await import('./database/queue.js')).dbQueue.getStats();
     } catch (dbErr) {
       health.database = 'error';
       health.databaseError = dbErr.message;
       health.status = 'degraded';
+
+      // Attempt to reconnect
+      try {
+        const { reconnectDatabase } = await import('./database/init.js');
+        const reconnectResult = reconnectDatabase();
+        if (reconnectResult.success) {
+          health.database = 'reconnected';
+          health.status = 'ok';
+          health.reconnectionAttempt = 'successful';
+        } else {
+          health.reconnectionAttempt = 'failed';
+        }
+      } catch (reconnectErr) {
+        health.reconnectionAttempt = 'failed';
+        health.reconnectionError = reconnectErr.message;
+      }
     }
 
     // Check kiwix
@@ -192,11 +212,13 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // Periodic health monitoring
+// Reduced frequency from 30s to 120s to minimize database contention
 setInterval(async () => {
   try {
     const { db } = await import('./database/init.js');
 
-    // Test database connection
+    // Test database connection with a simple read-only query
+    // This won't interfere with WAL or write operations
     const result = db.prepare('SELECT 1 as test').get();
     if (result?.test !== 1) {
       console.error('⚠️  Database health check failed - query returned unexpected result');
@@ -213,8 +235,21 @@ setInterval(async () => {
   } catch (err) {
     console.error('❌ Health check error:', err.message);
     console.error('Stack:', err.stack);
+
+    // Attempt to reconnect on error
+    try {
+      const { reconnectDatabase } = await import('./database/init.js');
+      const reconnectResult = reconnectDatabase();
+      if (reconnectResult.success) {
+        console.log('✓ Database reconnected successfully during health check');
+      } else {
+        console.error('❌ Database reconnection failed:', reconnectResult.error);
+      }
+    } catch (reconnectErr) {
+      console.error('❌ Failed to attempt reconnection:', reconnectErr.message);
+    }
   }
-}, 30000); // Check every 30 seconds
+}, 120000); // Check every 120 seconds (reduced from 30s to minimize contention)
 
 // Global error handlers to prevent server crashes
 process.on('uncaughtException', (err) => {
