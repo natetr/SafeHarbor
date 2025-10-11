@@ -68,9 +68,20 @@ export default function ZIMLogs() {
       'auto_update_failed': 'Auto-Update Failed',
       'zim_deleted': 'ZIM Deleted',
       'zim_delete_failed': 'Delete Failed',
+      'zim_quarantined': 'ZIM Quarantined',
       'backup_deleted': 'Backup Deleted',
       'metadata_updated': 'Metadata Updated',
-      'auto_update_toggled': 'Auto-Update Toggled'
+      'auto_update_toggled': 'Auto-Update Toggled',
+      'catalog_query_started': 'Catalog Query Started',
+      'catalog_query_completed': 'Catalog Query Completed',
+      'catalog_query_failed': 'Catalog Query Failed',
+      'file_validation_started': 'File Validation Started',
+      'file_validation_completed': 'File Validation Completed',
+      'file_validation_failed': 'File Validation Failed',
+      'kiwix_restart_started': 'Kiwix Restart Started',
+      'kiwix_restart_completed': 'Kiwix Restart Completed',
+      'kiwix_restart_failed': 'Kiwix Restart Failed',
+      'database_queue_warning': 'Database Queue Warning'
     };
     return labels[action] || action.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   };

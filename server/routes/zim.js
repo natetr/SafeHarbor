@@ -7,6 +7,7 @@ import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import si from 'systeminformation';
+import { zimLogger, startOperation, endOperation } from '../utils/zimLogger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,23 +99,27 @@ async function logZimActivity(action, options = {}) {
 // Start Kiwix server
 function startKiwixServer() {
   if (kiwixProcess) {
+    zimLogger.kiwix.verbose('Kiwix server already running - skipping start');
     return;
   }
 
   let zimFiles;
   try {
+    zimLogger.kiwix.detail('Loading active ZIM files from database');
     // Only load ZIMs with status='active'
     zimFiles = db.prepare("SELECT id, filepath, filename, title FROM zim_libraries WHERE status = 'active'").all();
 
     if (zimFiles.length === 0) {
-      console.log('No active ZIM files to serve');
+      zimLogger.kiwix.warn('No active ZIM files to serve - Kiwix server will not start');
       return;
     }
 
-    console.log(`Starting Kiwix with ${zimFiles.length} ZIM file(s):`);
-    zimFiles.forEach(z => console.log(`  - ${z.title || z.filename}`));
+    zimLogger.kiwix.info(`Starting Kiwix with ${zimFiles.length} ZIM file(s)`, {
+      count: zimFiles.length,
+      zims: zimFiles.map(z => z.title || z.filename)
+    });
   } catch (err) {
-    console.log('Kiwix: Database not ready yet or no ZIM files');
+    zimLogger.kiwix.error('Failed to query ZIM files from database', { error: err.message });
     return;
   }
 
@@ -123,18 +128,23 @@ function startKiwixServer() {
     ...zimFiles.map(f => f.filepath)
   ];
 
+  zimLogger.kiwix.verbose('Preparing Kiwix server spawn', { port: KIWIX_PORT, fileCount: zimFiles.length });
+
   // Check if kiwix-serve exists
   const kiwixPath = fs.existsSync(KIWIX_SERVE_PATH) ? KIWIX_SERVE_PATH : 'kiwix-serve';
+  zimLogger.kiwix.detail('Using Kiwix binary', { path: kiwixPath, exists: fs.existsSync(kiwixPath) || 'system PATH' });
 
   try {
+    zimLogger.kiwix.detail('Spawning Kiwix process', { command: kiwixPath, args });
     kiwixProcess = spawn(kiwixPath, args, {
       stdio: 'inherit'
     });
 
     kiwixStartTime = Date.now();
+    zimLogger.kiwix.success('Kiwix server process spawned successfully', { pid: kiwixProcess.pid, port: KIWIX_PORT });
 
     kiwixProcess.on('error', (err) => {
-      console.error('Kiwix server error:', err);
+      zimLogger.kiwix.error('Kiwix server process error', { error: err.message, code: err.code });
       kiwixProcess = null;
       kiwixStartTime = null;
     });
@@ -142,12 +152,21 @@ function startKiwixServer() {
     kiwixProcess.on('exit', (code) => {
       const uptime = kiwixStartTime ? Math.round((Date.now() - kiwixStartTime) / 1000) : 0;
       const timeSinceBoot = Math.round((Date.now() - serverBootTime) / 1000);
-      console.log(`Kiwix server exited with code ${code} after ${uptime} seconds (server uptime: ${timeSinceBoot}s)`);
+      zimLogger.kiwix.info(`Kiwix server exited`, {
+        exitCode: code,
+        uptime: `${uptime}s`,
+        serverUptime: `${timeSinceBoot}s`,
+        intentionalRestart: isRestarting
+      });
 
       // Grace period: Don't quarantine anything within first 30 seconds of server boot
       // This prevents false positives during initial startup when ZIM validation is slow
       if (timeSinceBoot < 30) {
-        console.log('⏳ Within startup grace period (30s) - not quarantining ZIMs');
+        zimLogger.kiwix.warn('Within startup grace period (30s) - not quarantining ZIMs', {
+          timeSinceBoot: `${timeSinceBoot}s`,
+          exitCode: code,
+          uptime: `${uptime}s`
+        });
         isRestarting = false;
         kiwixProcess = null;
         kiwixStartTime = null;
@@ -164,26 +183,42 @@ function startKiwixServer() {
                             (code === 0 && uptime < 10 && !isRestarting);
 
       if (isActualCrash) {
-        console.error('⚠️  Kiwix crashed! Attempting recovery...');
-        console.error(`   Exit code: ${code}, Uptime: ${uptime}s, Intentional restart: ${isRestarting}`);
+        zimLogger.kiwix.error('Kiwix crashed! Attempting recovery...', {
+          exitCode: code,
+          uptime: `${uptime}s`,
+          intentionalRestart: isRestarting,
+          crashType: code !== 0 ? 'non-zero-exit' : 'premature-exit'
+        });
 
         let zimToQuarantine = null;
 
         // Strategy 1: If we recently added a ZIM, it's likely the culprit
         if (lastAddedZimId) {
+          zimLogger.kiwix.detail('Checking recently added ZIM as crash suspect', { lastAddedZimId });
           const recentZim = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(lastAddedZimId);
           if (recentZim && recentZim.status === 'active') {
             zimToQuarantine = recentZim;
-            console.error(`Suspect: Recently added ZIM - ${zimToQuarantine.title || zimToQuarantine.filename}`);
+            zimLogger.kiwix.warn(`Crash suspect identified: Recently added ZIM`, {
+              zimId: zimToQuarantine.id,
+              title: zimToQuarantine.title,
+              filename: zimToQuarantine.filename,
+              strategy: 'recent-addition'
+            });
           }
         }
 
         // Strategy 2: If no recent ZIM, find the most recently created active ZIM
         if (!zimToQuarantine) {
+          zimLogger.kiwix.detail('No recently added ZIM - checking newest active ZIM');
           const newestZim = db.prepare("SELECT * FROM zim_libraries WHERE status = 'active' ORDER BY created_at DESC LIMIT 1").get();
           if (newestZim) {
             zimToQuarantine = newestZim;
-            console.error(`Suspect: Newest ZIM in database - ${zimToQuarantine.title || zimToQuarantine.filename}`);
+            zimLogger.kiwix.warn(`Crash suspect identified: Newest active ZIM`, {
+              zimId: zimToQuarantine.id,
+              title: zimToQuarantine.title,
+              filename: zimToQuarantine.filename,
+              strategy: 'newest-zim'
+            });
           }
         }
 
@@ -196,7 +231,12 @@ function startKiwixServer() {
             crashRecord.lastCrash = Date.now();
             zimCrashHistory.set(zimToQuarantine.id, crashRecord);
 
-            console.error(`ZIM crash history for ${zimToQuarantine.title}: ${crashRecord.count} crash(es)`);
+            zimLogger.kiwix.detail(`ZIM crash history updated`, {
+              zimId: zimToQuarantine.id,
+              title: zimToQuarantine.title,
+              crashCount: crashRecord.count,
+              lastCrash: new Date(crashRecord.lastCrash).toISOString()
+            });
 
             // Only quarantine if this ZIM has crashed 2+ times
             // This prevents false positives from temporary issues
@@ -575,29 +615,79 @@ router.get('/catalog', authenticateToken, requireAdmin, async (req, res) => {
 router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
   let filename;
   let filepath;
+  let operationId;
 
   try {
     const { url, title, description, language, size, articleCount, mediaCount, updated } = req.body;
 
     if (!url) {
+      zimLogger.download.error('Download request missing URL');
       return res.status(400).json({ error: 'Download URL required' });
     }
 
     filename = path.basename(url);
     filepath = path.join(ZIM_DIR, filename);
+    operationId = `download-${filename}-${Date.now()}`;
+
+    // Start operation tracking
+    startOperation(operationId, 'download', { url, filename, title, size });
+
+    zimLogger.download.detail('Validating download request', { url, filename, expectedSize: size });
+
+    // Validate URL format
+    try {
+      new URL(url);
+      zimLogger.download.verbose('URL validation passed', { url });
+    } catch (urlErr) {
+      zimLogger.download.error('Invalid URL format', { url, error: urlErr.message });
+      endOperation(operationId, false);
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
 
     // Check if already exists
+    zimLogger.download.verbose('Checking for existing ZIM', { filename });
     const existing = db.prepare('SELECT id FROM zim_libraries WHERE filename = ?').get(filename);
     if (existing) {
+      zimLogger.download.warn('ZIM file already exists in database', { filename, existingId: existing.id });
+      endOperation(operationId, false);
       return res.status(400).json({ error: 'ZIM file already exists' });
     }
+    zimLogger.download.verbose('No existing ZIM found - proceeding', { filename });
 
     // Check if already downloading
     if (activeDownloads.has(filename)) {
+      zimLogger.download.warn('Download already in progress', { filename });
+      endOperation(operationId, false);
       return res.status(400).json({ error: 'Download already in progress' });
     }
 
+    // Check disk space before starting
+    zimLogger.download.detail('Checking disk space availability', { requiredSize: size });
+    const diskSpace = await checkDiskSpace();
+    if (diskSpace) {
+      const availableGB = (diskSpace.available / 1024 / 1024 / 1024).toFixed(2);
+      const requiredGB = size ? (size / 1024 / 1024 / 1024).toFixed(2) : 'Unknown';
+      zimLogger.download.verbose('Disk space check', {
+        available: `${availableGB}GB`,
+        required: `${requiredGB}GB`,
+        totalDisk: `${(diskSpace.total / 1024 / 1024 / 1024).toFixed(2)}GB`
+      });
+
+      if (size && diskSpace.available < (size + 1024 * 1024 * 1024)) { // Need at least 1GB buffer
+        zimLogger.download.error('Insufficient disk space', {
+          available: `${availableGB}GB`,
+          required: `${requiredGB}GB`,
+          buffer: '1GB'
+        });
+        endOperation(operationId, false);
+        return res.status(400).json({
+          error: `Insufficient disk space. Available: ${availableGB}GB, Required: ${requiredGB}GB + 1GB buffer`
+        });
+      }
+    }
+
     // Initialize download tracking
+    zimLogger.download.info(`Starting download: ${title || filename}`, { url, size: size ? `${(size / 1024 / 1024 / 1024).toFixed(2)}GB` : 'Unknown' });
     activeDownloads.set(filename, {
       url,
       filename,
@@ -609,13 +699,12 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       startTime: Date.now()
     });
 
-    // Log download start
-    logZimActivity('download_started', {
+    // Log download start to database
+    await zimLogger.download.logStart({
       zimTitle: title || filename,
       zimFilename: filename,
       details: `URL: ${url}, Size: ${size ? (size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
-      userId: req.user?.id,
-      status: 'in_progress'
+      userId: req.user?.id
     });
 
     // Start download in background
@@ -625,35 +714,40 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
     });
 
     // Download file
+    zimLogger.download.detail('Creating file write stream', { filepath });
     const writer = fs.createWriteStream(filepath);
 
     // Attach error handler immediately to prevent crashes
     writer.on('error', (err) => {
-      console.error('Download write error:', err);
+      zimLogger.download.error('File write error during download', { filepath, error: err.message });
       const download = activeDownloads.get(filename);
       const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
       activeDownloads.delete(filename);
 
-      // Log download failure
-      logZimActivity('download_failed', {
+      // Log download failure to database
+      zimLogger.download.logFailed({
         zimTitle: title || filename,
         zimFilename: filename,
         details: `Write error: ${err.message}`,
         userId: req.user?.id,
-        status: 'failed',
         errorMessage: err.message,
         downloadDuration: downloadDuration
       });
 
       if (fs.existsSync(filepath)) {
         try {
+          zimLogger.download.verbose('Cleaning up partial download file', { filepath });
           fs.unlinkSync(filepath);
         } catch (cleanupErr) {
-          console.error('Failed to cleanup partial download:', cleanupErr);
+          zimLogger.download.error('Failed to cleanup partial download', { filepath, error: cleanupErr.message });
         }
       }
+
+      endOperation(operationId, false);
     });
 
+    zimLogger.download.detail('Initiating HTTP download request', { url });
+    let lastProgressLog = 0;
     const response = await axios({
       url,
       method: 'GET',
@@ -674,19 +768,36 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
             ? Math.round((progressEvent.loaded / totalSize) * 100)
             : 0;
           download.status = 'downloading';
+
+          // Log progress every 10%
+          if (download.progress >= lastProgressLog + 10) {
+            lastProgressLog = download.progress;
+            zimLogger.download.detail(`Download progress: ${download.progress}%`, {
+              filename,
+              downloaded: `${(download.downloadedSize / 1024 / 1024).toFixed(2)}MB`,
+              total: totalSize ? `${(totalSize / 1024 / 1024).toFixed(2)}MB` : 'Unknown'
+            });
+          }
         }
       }
+    });
+
+    zimLogger.download.verbose('HTTP response received - starting pipe to file', {
+      statusCode: response.status,
+      headers: response.headers
     });
 
     response.data.pipe(writer);
 
     writer.on('finish', async () => {
       try {
+        zimLogger.download.detail('File write stream finished - starting validation', { filename });
         const download = activeDownloads.get(filename);
         const downloadDuration = download ? Math.round((Date.now() - download.startTime) / 1000) : null;
 
         // Close the writer and wait for file system to flush
         writer.close();
+        zimLogger.download.verbose('File stream closed, waiting for OS buffer flush', { filename });
 
         // Small delay to ensure OS has flushed all buffers to disk
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -696,35 +807,59 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       // Get file size from filesystem
       let fileSize = size || null;
       try {
+        zimLogger.download.detail('Validating downloaded file', { filepath, expectedSize: size });
         const stats = fs.statSync(filepath);
         fileSize = stats.size;
 
+        zimLogger.download.verbose('File stats retrieved', {
+          filename,
+          actualSize: fileSize,
+          expectedSize: size,
+          sizeMatch: size ? Math.abs(fileSize - size) <= 1024 : 'N/A'
+        });
+
         // Validate file size if we know the expected size
         if (size && Math.abs(fileSize - size) > 1024) { // Allow 1KB difference
-          throw new Error(`File size mismatch. Expected: ${size}, Got: ${fileSize}. Download may be corrupted.`);
+          const error = `File size mismatch. Expected: ${size}, Got: ${fileSize}. Download may be corrupted.`;
+          zimLogger.download.error('File validation failed - size mismatch', {
+            filename,
+            expectedSize: size,
+            actualSize: fileSize,
+            difference: Math.abs(fileSize - size)
+          });
+          throw new Error(error);
         }
-      } catch (err) {
-        console.error('File validation error:', err);
 
-        // Log download failure
-        logZimActivity('download_failed', {
+        zimLogger.download.success('File validation passed', {
+          filename,
+          size: `${(fileSize / 1024 / 1024).toFixed(2)}MB`,
+          duration: `${downloadDuration}s`
+        });
+      } catch (err) {
+        zimLogger.download.error('File validation error', { filename, error: err.message });
+
+        // Log download failure to database
+        await zimLogger.download.logFailed({
           zimTitle: title || filename,
           zimFilename: filename,
           details: `File validation failed: ${err.message}`,
           userId: req.user?.id,
-          status: 'failed',
           errorMessage: err.message,
           downloadDuration: downloadDuration
         });
 
         // Delete corrupted file
         if (fs.existsSync(filepath)) {
+          zimLogger.download.verbose('Deleting corrupted file', { filepath });
           fs.unlinkSync(filepath);
         }
+
+        endOperation(operationId, false);
         return;
       }
 
       // Add to database with status='active'
+      zimLogger.download.detail('Inserting ZIM into database', { filename, title, language });
       const result = db.prepare(`
         INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
@@ -741,44 +876,73 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
         updated || null
       );
 
-      // Log download completion
-      logZimActivity('download_completed', {
+      zimLogger.download.verbose('Database insertion successful', {
+        zimId: result.lastInsertRowid,
+        filename,
+        rowsAffected: result.changes
+      });
+
+      // Log download completion to database
+      await zimLogger.download.logComplete({
         zimTitle: title || filename,
         zimFilename: filename,
         zimId: result.lastInsertRowid,
         details: `Language: ${language || 'Unknown'}, Articles: ${articleCount?.toLocaleString() || 'N/A'}`,
         userId: req.user?.id,
-        status: 'success',
         fileSize: fileSize,
         downloadDuration: downloadDuration
       });
 
       // Track this as the most recently added ZIM for crash detection
       lastAddedZimId = result.lastInsertRowid;
+      zimLogger.download.verbose('Marked as most recently added ZIM for crash detection', { zimId: result.lastInsertRowid });
 
         // Schedule a restart - will wait for all downloads to complete
-        console.log(`ZIM download complete: ${filename}.`);
+        zimLogger.download.info(`Download complete: ${filename} - scheduling Kiwix restart`, { zimId: result.lastInsertRowid });
         scheduleKiwixRestart(`load ${filename}`);
+
+        endOperation(operationId, true);
       } catch (err) {
-        console.error('Error in download finish handler:', err);
-        console.error('Stack:', err.stack);
+        zimLogger.download.error('Error in download finish handler', {
+          error: err.message,
+          stack: err.stack,
+          filename
+        });
         activeDownloads.delete(filename);
+
         // Clean up the file on error
         if (filepath && fs.existsSync(filepath)) {
           try {
+            zimLogger.download.verbose('Cleaning up file after error', { filepath });
             fs.unlinkSync(filepath);
           } catch (unlinkErr) {
-            console.error('Failed to clean up file after error:', unlinkErr);
+            zimLogger.download.error('Failed to clean up file after error', {
+              filepath,
+              error: unlinkErr.message
+            });
           }
         }
+
+        endOperation(operationId, false);
       }
     });
   } catch (err) {
-    console.error('Download error:', err);
+    zimLogger.download.error('Download operation failed', {
+      error: err.message,
+      code: err.code,
+      responseStatus: err.response?.status,
+      filename
+    });
+
+    if (operationId) {
+      endOperation(operationId, false);
+    }
+
     if (filename) {
       activeDownloads.delete(filename);
     }
     if (filepath && fs.existsSync(filepath)) {
+      zimLogger.download.verbose('Cleaning up partial download after error', { filepath });
       fs.unlinkSync(filepath);
     }
     if (!res.headersSent) {
@@ -786,8 +950,10 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       let errorMsg = 'Failed to start download';
       if (err.response?.status === 429) {
         errorMsg = 'Too many download requests. Please wait a few minutes and try again.';
+        zimLogger.download.warn('Rate limited by download server', { url, status: 429 });
       } else if (err.code === 'ENOTFOUND') {
         errorMsg = 'Unable to connect to download server. Check your internet connection.';
+        zimLogger.download.error('DNS resolution failed', { url, code: err.code });
       } else if (err.message) {
         errorMsg = err.message;
       }
@@ -1007,23 +1173,37 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
 
 // Search within ZIM content using kiwix-serve
 router.get('/search', async (req, res) => {
+  const operationId = `zim-search-${Date.now()}`;
+
   try {
     const { q, zimId, limit = 20 } = req.query;
 
     if (!q || q.trim().length < 2) {
+      zimLogger.search.warn('Search query too short', { query: q, minLength: 2 });
       return res.status(400).json({ error: 'Search query must be at least 2 characters' });
     }
+
+    startOperation(operationId, 'search', { query: q, zimId, limit });
+    zimLogger.search.info(`Searching ZIM content`, { query: q, zimId: zimId || 'all', limit });
 
     const results = [];
 
     // Get ZIM libraries to search
     let zimsToSearch = [];
     if (zimId) {
+      zimLogger.search.detail('Searching specific ZIM', { zimId });
       const zim = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(zimId);
       if (zim) zimsToSearch = [zim];
+      else zimLogger.search.warn('Requested ZIM not found', { zimId });
     } else {
+      zimLogger.search.detail('Searching all visible ZIMs');
       zimsToSearch = db.prepare('SELECT * FROM zim_libraries WHERE hidden = 0').all();
     }
+
+    zimLogger.search.verbose(`Found ${zimsToSearch.length} ZIM(s) to search`, {
+      count: zimsToSearch.length,
+      titles: zimsToSearch.map(z => z.title)
+    });
 
     // Search each ZIM via kiwix-serve
     for (const zim of zimsToSearch) {
@@ -1032,8 +1212,20 @@ router.get('/search', async (req, res) => {
         // Kiwix-serve search format: /search?pattern=query&content=zimname
         const searchUrl = `http://localhost:${KIWIX_PORT}/search?pattern=${encodeURIComponent(q)}&content=${encodeURIComponent(zimName)}&pageLength=${limit}`;
 
+        zimLogger.search.detail(`Querying kiwix-serve for ${zim.title}`, {
+          zimId: zim.id,
+          zimName,
+          searchUrl
+        });
+
         const response = await axios.get(searchUrl, { timeout: 10000 });
         const html = response.data;
+
+        zimLogger.search.verbose(`Received search response from kiwix-serve`, {
+          zimTitle: zim.title,
+          statusCode: response.status,
+          contentLength: html.length
+        });
 
         // Parse HTML to extract search results
         // Look for result links - kiwix uses different formats
@@ -1074,10 +1266,23 @@ router.get('/search', async (req, res) => {
           }
         });
       } catch (err) {
-        console.error(`Search error for ZIM ${zim.title}:`, err.message);
+        zimLogger.search.error(`Search error for ZIM ${zim.title}`, {
+          zimId: zim.id,
+          zimTitle: zim.title,
+          error: err.message,
+          code: err.code
+        });
         // Continue with other ZIMs even if one fails
       }
     }
+
+    zimLogger.search.success(`Search complete`, {
+      query: q,
+      totalResults: results.length,
+      zimsSearched: zimsToSearch.length
+    });
+
+    endOperation(operationId, true);
 
     res.json({
       query: q,
@@ -1085,7 +1290,8 @@ router.get('/search', async (req, res) => {
       results: results.slice(0, parseInt(limit))
     });
   } catch (err) {
-    console.error('ZIM search error:', err);
+    zimLogger.search.error('ZIM search failed', { error: err.message, stack: err.stack });
+    endOperation(operationId, false);
     res.status(500).json({ error: 'ZIM search failed: ' + err.message });
   }
 });

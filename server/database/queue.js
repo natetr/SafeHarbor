@@ -1,6 +1,26 @@
 // Database operation queue to prevent concurrent access issues
 // This ensures all database operations are serialized
 
+// Import zimLogger for queue monitoring
+let zimLogger = null;
+let loggerInitAttempted = false;
+
+// Lazy load zimLogger to avoid circular dependency
+async function getZimLogger() {
+  if (zimLogger) return zimLogger;
+  if (loggerInitAttempted) return null;
+
+  try {
+    loggerInitAttempted = true;
+    const module = await import('../utils/zimLogger.js');
+    zimLogger = module.zimLogger;
+    return zimLogger;
+  } catch (err) {
+    // Logger not available yet (during startup)
+    return null;
+  }
+}
+
 class DatabaseQueue {
   constructor() {
     this.queue = [];
@@ -11,6 +31,7 @@ class DatabaseQueue {
     this.totalWaitTime = 0;
     this.maxQueueDepth = 0;
     this.lastStatsLog = Date.now();
+    this.lastQueueWarning = 0;
   }
 
   async execute(operation) {
@@ -23,8 +44,19 @@ class DatabaseQueue {
     }
 
     // Warn if queue is getting long (potential contention)
-    if (this.queue.length > 10) {
+    // Only log once every 10 seconds to avoid spam
+    if (this.queue.length > 10 && (Date.now() - this.lastQueueWarning) > 10000) {
+      this.lastQueueWarning = Date.now();
       console.warn(`⚠️  Database queue depth: ${this.queue.length} operations waiting`);
+
+      // Use zimLogger if available
+      const logger = await getZimLogger();
+      if (logger) {
+        logger.database.logQueueWarning(this.queue.length, {
+          maxQueueDepth: this.maxQueueDepth,
+          totalOperations: this.totalOperations
+        });
+      }
     }
 
     return new Promise((resolve, reject) => {
