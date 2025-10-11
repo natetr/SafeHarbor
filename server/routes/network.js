@@ -2,16 +2,17 @@ import express from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { authenticateToken, requireAdmin } from '../middleware/auth.js';
-import db from '../database/init.js';
+import db, { safeDbGet, safeDbRun } from '../database/init.js';
 import fs from 'fs';
 
 const router = express.Router();
 const execAsync = promisify(exec);
 
 // Get current network configuration
-router.get('/config', authenticateToken, requireAdmin, (req, res) => {
+router.get('/config', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const config = db.prepare('SELECT * FROM network_config ORDER BY id DESC LIMIT 1').get();
+    // CRITICAL: Use queued database read
+    const config = await safeDbGet('SELECT * FROM network_config ORDER BY id DESC LIMIT 1', []);
     res.json(config || {});
   } catch (err) {
     console.error('Error fetching network config:', err);
@@ -38,8 +39,8 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Invalid network mode' });
     }
 
-    // Get current config
-    const currentConfig = db.prepare('SELECT * FROM network_config ORDER BY id DESC LIMIT 1').get();
+    // Get current config - CRITICAL: Use queued database read
+    const currentConfig = await safeDbGet('SELECT * FROM network_config ORDER BY id DESC LIMIT 1', []);
 
     if (currentConfig) {
       // Update existing config
@@ -58,13 +59,14 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
       updates.push('updated_at = CURRENT_TIMESTAMP');
       params.push(currentConfig.id);
 
-      db.prepare(`UPDATE network_config SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+      // CRITICAL: Use queued database write
+      await safeDbRun(`UPDATE network_config SET ${updates.join(', ')} WHERE id = ?`, params);
     } else {
-      // Insert new config
-      db.prepare(`
+      // Insert new config - CRITICAL: Use queued database write
+      await safeDbRun(`
         INSERT INTO network_config (mode, hotspot_ssid, hotspot_password, hotspot_open, connection_limit, home_network_ssid, home_network_password, captive_portal)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
+      `, [
         mode || 'hotspot',
         hotspot_ssid || 'SafeHarbor',
         hotspot_password || 'safeharbor2024',
@@ -73,7 +75,7 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
         home_network_ssid || null,
         home_network_password || null,
         captive_portal ? 1 : 0
-      );
+      ]);
     }
 
     res.json({ message: 'Network configuration updated', requiresApply: true });
@@ -86,7 +88,8 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
 // Apply network configuration
 router.post('/apply', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const config = db.prepare('SELECT * FROM network_config ORDER BY id DESC LIMIT 1').get();
+    // CRITICAL: Use queued database read
+    const config = await safeDbGet('SELECT * FROM network_config ORDER BY id DESC LIMIT 1', []);
 
     if (!config) {
       return res.status(400).json({ error: 'No network configuration found' });
