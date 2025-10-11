@@ -992,17 +992,18 @@ router.get('/download/progress', authenticateToken, requireAdmin, (req, res) => 
 });
 
 // Get ZIM update settings (MUST come before /:id routes)
-router.get('/update-settings', authenticateToken, requireAdmin, (req, res) => {
+router.get('/update-settings', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    let settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+    // CRITICAL: Use queued database read
+    let settings = await safeDbGet('SELECT * FROM zim_update_settings WHERE id = 1', []);
 
     if (!settings) {
-      // Create default settings if they don't exist
-      db.prepare(`
+      // Create default settings if they don't exist - CRITICAL: Use queued database write
+      await safeDbRun(`
         INSERT INTO zim_update_settings (id, check_interval_hours, auto_download_enabled, min_space_buffer_gb, download_start_hour, download_end_hour)
         VALUES (1, 24, 0, 5.0, 2, 6)
-      `).run();
-      settings = db.prepare('SELECT * FROM zim_update_settings WHERE id = 1').get();
+      `, []);
+      settings = await safeDbGet('SELECT * FROM zim_update_settings WHERE id = 1', []);
     }
 
     res.json(settings);
