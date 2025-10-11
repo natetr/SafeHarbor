@@ -149,7 +149,7 @@ async function startKiwixServer() {
       kiwixStartTime = null;
     });
 
-    kiwixProcess.on('exit', (code) => {
+    kiwixProcess.on('exit', async (code) => {
       const uptime = kiwixStartTime ? Math.round((Date.now() - kiwixStartTime) / 1000) : 0;
       const timeSinceBoot = Math.round((Date.now() - serverBootTime) / 1000);
       zimLogger.kiwix.info(`Kiwix server exited`, {
