@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
 import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/auth.js';
-import db from '../database/init.js';
+import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import si from 'systeminformation';
@@ -68,7 +68,8 @@ async function checkDiskSpace() {
 }
 
 // Helper function to log ZIM activities
-function logZimActivity(action, options = {}) {
+// CRITICAL: Made async and uses queued database operations to prevent crashes
+async function logZimActivity(action, options = {}) {
   try {
     const {
       zimTitle = null,
@@ -82,10 +83,11 @@ function logZimActivity(action, options = {}) {
       downloadDuration = null
     } = options;
 
-    db.prepare(`
+    // Use queued database operation to prevent conflicts with concurrent operations
+    await safeDbRun(`
       INSERT INTO zim_logs (action, zim_title, zim_filename, zim_id, details, user_id, status, error_message, file_size, download_duration)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(action, zimTitle, zimFilename, zimId, details, userId, status, errorMessage, fileSize, downloadDuration);
+    `, [action, zimTitle, zimFilename, zimId, details, userId, status, errorMessage, fileSize, downloadDuration]);
 
     console.log(`[ZIM LOG] ${action}: ${zimTitle || zimFilename || 'N/A'} - ${status}`);
   } catch (err) {
@@ -1735,7 +1737,7 @@ router.post('/:id/update', authenticateToken, requireAdmin, async (req, res) => 
 });
 
 // Toggle auto-update for a ZIM library
-router.patch('/:id/auto-update', authenticateToken, requireAdmin, (req, res) => {
+router.patch('/:id/auto-update', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { enabled } = req.body;
 
@@ -1743,16 +1745,17 @@ router.patch('/:id/auto-update', authenticateToken, requireAdmin, (req, res) => 
       return res.status(400).json({ error: 'enabled must be a boolean' });
     }
 
-    const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
+    const library = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [req.params.id]);
     if (!library) {
       return res.status(404).json({ error: 'ZIM library not found' });
     }
 
-    db.prepare('UPDATE zim_libraries SET auto_update_enabled = ? WHERE id = ?')
-      .run(enabled ? 1 : 0, req.params.id);
+    // Use queued database operation to prevent conflicts
+    await safeDbRun('UPDATE zim_libraries SET auto_update_enabled = ? WHERE id = ?',
+      [enabled ? 1 : 0, req.params.id]);
 
-    // Log auto-update toggle
-    logZimActivity('auto_update_toggled', {
+    // Log auto-update toggle (async, will be queued)
+    await logZimActivity('auto_update_toggled', {
       zimTitle: library.title,
       zimFilename: library.filename,
       zimId: library.id,
