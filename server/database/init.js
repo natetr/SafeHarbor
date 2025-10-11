@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import path from 'path';
 import fs from 'fs';
+import { dbQueue } from './queue.js';
 
 const DB_PATH = process.env.DATABASE_PATH || './safeharbor.db';
 
@@ -40,60 +41,172 @@ try {
 }
 
 // Safe database wrapper that queues operations to prevent crashes
-export function safeDbRun(query, params = []) {
+// CRITICAL: All database operations are now serialized through a queue
+// This prevents WAL lock contention and SQLITE_BUSY errors
+export async function safeDbRun(query, params = []) {
+  return dbQueue.execute(() => {
+    try {
+      const start = Date.now();
+      const stmt = db.prepare(query);
+      const result = stmt.run(...params);
+      const duration = Date.now() - start;
+
+      if (duration > 1000) {
+        console.warn(`⚠️  Slow DB write (${duration}ms): ${query.substring(0, 100)}`);
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Database error:', err.message);
+      console.error('Query:', query);
+      console.error('Params:', params);
+      throw err;
+    }
+  });
+}
+
+export async function safeDbGet(query, params = []) {
+  return dbQueue.execute(() => {
+    try {
+      const start = Date.now();
+      const stmt = db.prepare(query);
+      const result = stmt.get(...params);
+      const duration = Date.now() - start;
+
+      if (duration > 500) {
+        console.warn(`⚠️  Slow DB read (${duration}ms): ${query.substring(0, 100)}`);
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Database error:', err.message);
+      console.error('Query:', query);
+      console.error('Params:', params);
+      throw err;
+    }
+  });
+}
+
+export async function safeDbAll(query, params = []) {
+  return dbQueue.execute(() => {
+    try {
+      const start = Date.now();
+      const stmt = db.prepare(query);
+      const result = stmt.all(...params);
+      const duration = Date.now() - start;
+
+      if (duration > 1000) {
+        console.warn(`⚠️  Slow DB query (${duration}ms): ${query.substring(0, 100)}`);
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Database error:', err.message);
+      console.error('Query:', query);
+      console.error('Params:', params);
+      throw err;
+    }
+  });
+}
+
+// Function to configure database pragmas
+function configureDatabasePragmas(database) {
+  database.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
+  database.pragma('busy_timeout = 30000'); // Wait up to 30 seconds for locks (increased from 5s)
+  database.pragma('synchronous = NORMAL'); // Balance between safety and performance
+  database.pragma('cache_size = -64000'); // 64MB cache for better performance
+  database.pragma('foreign_keys = ON'); // Enable foreign key constraints
+  database.pragma('wal_autocheckpoint = 100'); // Checkpoint every 100 pages to prevent WAL from growing too large
+  database.pragma('temp_store = MEMORY'); // Store temp tables in memory for better performance
+}
+
+// Function to reconnect to database
+export function reconnectDatabase() {
   try {
-    const stmt = db.prepare(query);
-    return stmt.run(...params);
+    console.log('🔄 Attempting to reconnect to database...');
+
+    // Try to close existing connection gracefully
+    try {
+      if (db) {
+        db.close();
+        console.log('✓ Closed existing database connection');
+      }
+    } catch (closeErr) {
+      console.warn('⚠️ Error closing database (may already be closed):', closeErr.message);
+    }
+
+    // Create new connection
+    db = new Database(DB_PATH);
+    console.log('✓ Created new database connection');
+
+    // Apply all pragma settings
+    configureDatabasePragmas(db);
+    console.log('✓ Database reconnected successfully');
+
+    return { success: true, message: 'Database reconnected successfully' };
   } catch (err) {
-    console.error('Database error:', err.message);
-    console.error('Query:', query);
-    throw err;
+    console.error('❌ Failed to reconnect database:', err.message);
+    return { success: false, error: err.message };
   }
 }
 
-export function safeDbGet(query, params = []) {
-  try {
-    const stmt = db.prepare(query);
-    return stmt.get(...params);
-  } catch (err) {
-    console.error('Database error:', err.message);
-    console.error('Query:', query);
-    throw err;
-  }
-}
+// Wrapper for db.prepare() that adds queueing for write operations
+// Read operations (SELECT) can bypass queue, writes go through queue
+export function queuedPrepare(query) {
+  const stmt = db.prepare(query);
+  const isWriteQuery = /^\s*(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)/i.test(query);
 
-export function safeDbAll(query, params = []) {
-  try {
-    const stmt = db.prepare(query);
-    return stmt.all(...params);
-  } catch (err) {
-    console.error('Database error:', err.message);
-    console.error('Query:', query);
-    throw err;
+  // For write operations, wrap run() in the queue
+  if (isWriteQuery) {
+    const originalRun = stmt.run.bind(stmt);
+    stmt.run = (...params) => {
+      // Return a promise that queues the operation
+      return dbQueue.execute(() => {
+        try {
+          const start = Date.now();
+          const result = originalRun(...params);
+          const duration = Date.now() - start;
+
+          if (duration > 1000) {
+            console.warn(`⚠️  Slow queued write (${duration}ms): ${query.substring(0, 100)}`);
+          }
+
+          return result;
+        } catch (err) {
+          console.error('Queued DB operation error:', err.message);
+          console.error('Query:', query.substring(0, 200));
+          throw err;
+        }
+      });
+    };
   }
+
+  return stmt;
 }
 
 export { db };
 
 // Configure database for production use with concurrent access
-db.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
-db.pragma('busy_timeout = 30000'); // Wait up to 30 seconds for locks (increased from 5s)
-db.pragma('synchronous = NORMAL'); // Balance between safety and performance
-db.pragma('cache_size = -64000'); // 64MB cache for better performance
-db.pragma('foreign_keys = ON'); // Enable foreign key constraints
-db.pragma('wal_autocheckpoint = 100'); // Checkpoint every 100 pages to prevent WAL from growing too large
-db.pragma('temp_store = MEMORY'); // Store temp tables in memory for better performance
-
+configureDatabasePragmas(db);
 console.log('Database configured with WAL mode and optimized settings');
 
 // Periodic WAL checkpoint to prevent unbounded growth
+// Increased to every 5 minutes to reduce contention (was 1 minute)
 setInterval(() => {
-  try {
-    db.pragma('wal_checkpoint(PASSIVE)');
-  } catch (err) {
-    console.error('WAL checkpoint error:', err.message);
-  }
-}, 60000); // Every minute
+  // Queue the checkpoint to prevent conflicts with other operations
+  dbQueue.execute(() => {
+    try {
+      const start = Date.now();
+      db.pragma('wal_checkpoint(PASSIVE)');
+      const duration = Date.now() - start;
+      console.log(`✓ WAL checkpoint completed in ${duration}ms`);
+    } catch (err) {
+      console.error('❌ WAL checkpoint error:', err.message);
+    }
+  }).catch(err => {
+    console.error('❌ Failed to queue WAL checkpoint:', err);
+  });
+}, 300000); // Every 5 minutes (reduced from 1 minute)
 
 export function initDatabase() {
   // Users table

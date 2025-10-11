@@ -434,8 +434,9 @@ async function runUpdateCheck(restartKiwixCallback) {
         // Continue with next library
       }
 
-      // Add delay between checks to avoid overwhelming the server
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Add delay between checks to avoid overwhelming the server and database
+      // Increased to 5 seconds to reduce database contention
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
 
     console.log('[Auto-Update] Update check complete.');

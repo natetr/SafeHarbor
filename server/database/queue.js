@@ -5,11 +5,30 @@ class DatabaseQueue {
   constructor() {
     this.queue = [];
     this.isProcessing = false;
+    this.totalOperations = 0;
+    this.completedOperations = 0;
+    this.failedOperations = 0;
+    this.totalWaitTime = 0;
+    this.maxQueueDepth = 0;
+    this.lastStatsLog = Date.now();
   }
 
   async execute(operation) {
+    const queuedAt = Date.now();
+    this.totalOperations++;
+
+    // Track max queue depth
+    if (this.queue.length > this.maxQueueDepth) {
+      this.maxQueueDepth = this.queue.length;
+    }
+
+    // Warn if queue is getting long (potential contention)
+    if (this.queue.length > 10) {
+      console.warn(`⚠️  Database queue depth: ${this.queue.length} operations waiting`);
+    }
+
     return new Promise((resolve, reject) => {
-      this.queue.push({ operation, resolve, reject });
+      this.queue.push({ operation, resolve, reject, queuedAt });
       this.process();
     });
   }
@@ -22,12 +41,22 @@ class DatabaseQueue {
     this.isProcessing = true;
 
     while (this.queue.length > 0) {
-      const { operation, resolve, reject } = this.queue.shift();
+      const { operation, resolve, reject, queuedAt } = this.queue.shift();
+      const waitTime = Date.now() - queuedAt;
+      this.totalWaitTime += waitTime;
+
+      // Warn if an operation waited too long in queue
+      if (waitTime > 5000) {
+        console.warn(`⚠️  Database operation waited ${waitTime}ms in queue`);
+      }
 
       try {
         const result = await operation();
+        this.completedOperations++;
         resolve(result);
       } catch (err) {
+        this.failedOperations++;
+        console.error('❌ Queued database operation failed:', err.message);
         reject(err);
       }
 
@@ -36,6 +65,38 @@ class DatabaseQueue {
     }
 
     this.isProcessing = false;
+
+    // Log statistics every 5 minutes
+    if (Date.now() - this.lastStatsLog > 300000) {
+      this.logStats();
+      this.lastStatsLog = Date.now();
+    }
+  }
+
+  logStats() {
+    const avgWaitTime = this.totalOperations > 0
+      ? Math.round(this.totalWaitTime / this.totalOperations)
+      : 0;
+
+    console.log('📊 Database Queue Statistics:');
+    console.log(`   Total operations: ${this.totalOperations}`);
+    console.log(`   Completed: ${this.completedOperations}`);
+    console.log(`   Failed: ${this.failedOperations}`);
+    console.log(`   Average wait time: ${avgWaitTime}ms`);
+    console.log(`   Max queue depth: ${this.maxQueueDepth}`);
+  }
+
+  getStats() {
+    return {
+      totalOperations: this.totalOperations,
+      completedOperations: this.completedOperations,
+      failedOperations: this.failedOperations,
+      averageWaitTime: this.totalOperations > 0
+        ? Math.round(this.totalWaitTime / this.totalOperations)
+        : 0,
+      maxQueueDepth: this.maxQueueDepth,
+      currentQueueDepth: this.queue.length
+    };
   }
 }
 

@@ -23,6 +23,8 @@ let lastAddedZimId = null; // Track the most recently added ZIM
 let isRestarting = false; // Track if we're intentionally restarting
 let restartPending = false; // Track if a restart is queued
 let restartTimer = null; // Timer for debounced restart
+let serverBootTime = Date.now(); // Track when the server started
+let zimCrashHistory = new Map(); // Track crash history: zimId -> { count, lastCrash }
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -137,15 +139,31 @@ function startKiwixServer() {
 
     kiwixProcess.on('exit', (code) => {
       const uptime = kiwixStartTime ? Math.round((Date.now() - kiwixStartTime) / 1000) : 0;
-      console.log(`Kiwix server exited with code ${code} after ${uptime} seconds`);
+      const timeSinceBoot = Math.round((Date.now() - serverBootTime) / 1000);
+      console.log(`Kiwix server exited with code ${code} after ${uptime} seconds (server uptime: ${timeSinceBoot}s)`);
+
+      // Grace period: Don't quarantine anything within first 30 seconds of server boot
+      // This prevents false positives during initial startup when ZIM validation is slow
+      if (timeSinceBoot < 30) {
+        console.log('⏳ Within startup grace period (30s) - not quarantining ZIMs');
+        isRestarting = false;
+        kiwixProcess = null;
+        kiwixStartTime = null;
+        // Retry after grace period
+        setTimeout(() => startKiwixServer(), 5000);
+        return;
+      }
 
       // Detect crash - only quarantine on actual crashes, not intentional restarts
-      // A crash is: non-zero exit code within 5 seconds, or code 0 exit < 2 seconds (unless we're restarting)
-      const isActualCrash = (code !== 0 && code !== null && uptime < 5) ||
-                            (code === 0 && uptime < 2 && !isRestarting);
+      // Increased thresholds to account for slower ZIM validation:
+      // - Non-zero exit within 15 seconds (increased from 5s)
+      // - Code 0 exit within 10 seconds AND not intentional restart (increased from 2s)
+      const isActualCrash = (code !== 0 && code !== null && uptime < 15) ||
+                            (code === 0 && uptime < 10 && !isRestarting);
 
       if (isActualCrash) {
         console.error('⚠️  Kiwix crashed! Attempting recovery...');
+        console.error(`   Exit code: ${code}, Uptime: ${uptime}s, Intentional restart: ${isRestarting}`);
 
         let zimToQuarantine = null;
 
@@ -167,28 +185,46 @@ function startKiwixServer() {
           }
         }
 
-        // Quarantine the suspected ZIM
+        // Quarantine the suspected ZIM with confidence scoring
         if (zimToQuarantine) {
           try {
-            console.error(`Quarantining problematic ZIM: ${zimToQuarantine.title || zimToQuarantine.filename}`);
+            // Track crash history for this ZIM
+            const crashRecord = zimCrashHistory.get(zimToQuarantine.id) || { count: 0, lastCrash: null };
+            crashRecord.count++;
+            crashRecord.lastCrash = Date.now();
+            zimCrashHistory.set(zimToQuarantine.id, crashRecord);
 
-            // Quarantine the ZIM
-            db.prepare("UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?")
-              .run(`Kiwix crashed when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`, zimToQuarantine.id);
+            console.error(`ZIM crash history for ${zimToQuarantine.title}: ${crashRecord.count} crash(es)`);
 
-            // Log the quarantine
-            logZimActivity('zim_quarantined', {
-              zimTitle: zimToQuarantine.title,
-              zimFilename: zimToQuarantine.filename,
-              zimId: zimToQuarantine.id,
-              details: `Automatically quarantined after Kiwix crash (code: ${code}, uptime: ${uptime}s)`,
-              status: 'success'
-            });
+            // Only quarantine if this ZIM has crashed 2+ times
+            // This prevents false positives from temporary issues
+            if (crashRecord.count >= 2) {
+              console.error(`⚠️  Quarantining problematic ZIM after ${crashRecord.count} crashes: ${zimToQuarantine.title || zimToQuarantine.filename}`);
 
-            lastAddedZimId = null; // Reset
+              // Quarantine the ZIM
+              db.prepare("UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?")
+                .run(`Kiwix crashed ${crashRecord.count} times when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`, zimToQuarantine.id);
 
-            // Retry without the problematic ZIM
-            console.log('Retrying Kiwix server without the problematic ZIM...');
+              // Log the quarantine
+              logZimActivity('zim_quarantined', {
+                zimTitle: zimToQuarantine.title,
+                zimFilename: zimToQuarantine.filename,
+                zimId: zimToQuarantine.id,
+                details: `Automatically quarantined after ${crashRecord.count} crashes (code: ${code}, uptime: ${uptime}s)`,
+                status: 'success'
+              });
+
+              // Clear crash history for this ZIM after quarantine
+              zimCrashHistory.delete(zimToQuarantine.id);
+              lastAddedZimId = null; // Reset
+            } else {
+              console.warn(`⚠️  ZIM ${zimToQuarantine.title} caused crash ${crashRecord.count}/2 - giving it another chance`);
+              // Don't quarantine yet, but clear lastAddedZimId so we don't keep blaming this one
+              lastAddedZimId = null;
+            }
+
+            // Retry without the problematic ZIM (if quarantined) or with all ZIMs (if giving another chance)
+            console.log('Retrying Kiwix server...');
             setTimeout(() => startKiwixServer(), 2000);
             return;
           } catch (err) {
@@ -1380,8 +1416,9 @@ async function runUpdateCheckBackground() {
 
         updateCheckStatus.progress++;
 
-        // Longer delay to give database breathing room
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Longer delay to give database breathing room (increased from 500ms to 2000ms)
+        // This significantly reduces database lock contention during update checks
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
       } catch (err) {
         console.error(`[Update Check] Failed to check ${library.title}:`, err.message);
