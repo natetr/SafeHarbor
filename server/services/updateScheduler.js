@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import db from '../database/init.js';
+import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
@@ -39,7 +39,8 @@ async function checkDiskSpace() {
 }
 
 // Helper function to log ZIM activities (auto-update actions)
-function logZimActivity(action, options = {}) {
+// CRITICAL: Made async and uses queued database operations to prevent crashes
+async function logZimActivity(action, options = {}) {
   try {
     const {
       zimTitle = null,
@@ -52,10 +53,11 @@ function logZimActivity(action, options = {}) {
       downloadDuration = null
     } = options;
 
-    db.prepare(`
+    // Use queued database operation to prevent conflicts
+    await safeDbRun(`
       INSERT INTO zim_logs (action, zim_title, zim_filename, zim_id, details, user_id, status, error_message, file_size, download_duration)
       VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
-    `).run(action, zimTitle, zimFilename, zimId, details, status, errorMessage, fileSize, downloadDuration);
+    `, [action, zimTitle, zimFilename, zimId, details, status, errorMessage, fileSize, downloadDuration]);
 
     console.log(`[AUTO-UPDATE LOG] ${action}: ${zimTitle || zimFilename || 'N/A'} - ${status}`);
   } catch (err) {
@@ -162,12 +164,13 @@ async function checkZimForUpdate(library) {
 
     const now = new Date().toISOString();
     if (updateAvailable && latestEntry) {
-      db.prepare(`
+      // Use queued database operation to prevent conflicts
+      await safeDbRun(`
         UPDATE zim_libraries
         SET last_checked_at = ?, available_update_url = ?, available_update_version = ?, available_update_size = ?, available_update_date = ?,
             available_update_article_count = ?, available_update_media_count = ?
         WHERE id = ?
-      `).run(now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, library.id);
+      `, [now, latestEntry.url, latestEntry.version, latestEntry.size, latestEntry.updated, latestEntry.articleCount, latestEntry.mediaCount, library.id]);
 
       return {
         id: library.id,
@@ -178,12 +181,13 @@ async function checkZimForUpdate(library) {
         updateSize: latestEntry.size
       };
     } else {
-      db.prepare(`
+      // Use queued database operation to prevent conflicts
+      await safeDbRun(`
         UPDATE zim_libraries
         SET last_checked_at = ?, available_update_url = NULL, available_update_version = NULL, available_update_size = NULL,
             available_update_date = NULL, available_update_article_count = NULL, available_update_media_count = NULL
         WHERE id = ?
-      `).run(now, library.id);
+      `, [now, library.id]);
 
       return {
         id: library.id,
@@ -229,8 +233,8 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
 
     const startTime = Date.now();
 
-    // Log auto-update start
-    logZimActivity('auto_update_started', {
+    // Log auto-update start (async, will be queued)
+    await logZimActivity('auto_update_started', {
       zimTitle: library.title,
       zimFilename: library.filename,
       zimId: library.id,
@@ -265,19 +269,19 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
           // Get file size
           const stats = fs.statSync(finalFilepath);
 
-          // Update database
-          db.prepare(`
+          // Update database using queued operation to prevent conflicts
+          await safeDbRun(`
             UPDATE zim_libraries
             SET filename = ?, filepath = ?, size = ?,
                 available_update_url = NULL, available_update_version = NULL, available_update_size = NULL, available_update_date = NULL,
                 available_update_article_count = NULL, available_update_media_count = NULL,
                 url = ?, updated_date = ?, article_count = ?, media_count = ?
             WHERE id = ?
-          `).run(newFilename, finalFilepath, stats.size, downloadUrl, library.available_update_date,
-                 library.available_update_article_count, library.available_update_media_count, library.id);
+          `, [newFilename, finalFilepath, stats.size, downloadUrl, library.available_update_date,
+             library.available_update_article_count, library.available_update_media_count, library.id]);
 
-          // Log auto-update completion
-          logZimActivity('auto_update_completed', {
+          // Log auto-update completion (async, will be queued)
+          await logZimActivity('auto_update_completed', {
             zimTitle: library.title,
             zimFilename: newFilename,
             zimId: library.id,
@@ -293,11 +297,11 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
           }
 
           // Delete backup after successful restart
-          setTimeout(() => {
+          setTimeout(async () => {
             if (fs.existsSync(backupFilepath)) {
               fs.unlinkSync(backupFilepath);
-              // Log backup deletion
-              logZimActivity('backup_deleted', {
+              // Log backup deletion (async, will be queued)
+              await logZimActivity('backup_deleted', {
                 zimTitle: library.title,
                 zimFilename: library.filename,
                 zimId: library.id,
@@ -312,8 +316,8 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
         } catch (err) {
           console.error('Update finalization error:', err);
 
-          // Log auto-update failure
-          logZimActivity('auto_update_failed', {
+          // Log auto-update failure (async, will be queued)
+          await logZimActivity('auto_update_failed', {
             zimTitle: library.title,
             zimFilename: library.filename,
             zimId: library.id,
@@ -335,12 +339,12 @@ async function downloadAndInstallUpdate(library, restartKiwixCallback) {
         }
       });
 
-      writer.on('error', (err) => {
+      writer.on('error', async (err) => {
         console.error('Update download error:', err);
         const downloadDuration = Math.round((Date.now() - startTime) / 1000);
 
-        // Log auto-update download failure
-        logZimActivity('auto_update_failed', {
+        // Log auto-update download failure (async, will be queued)
+        await logZimActivity('auto_update_failed', {
           zimTitle: library.title,
           zimFilename: library.filename,
           zimId: library.id,
