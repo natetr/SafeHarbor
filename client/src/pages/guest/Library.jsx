@@ -7,10 +7,18 @@ export default function GuestLibrary() {
   const [content, setContent] = useState([]);
   const [zims, setZims] = useState([]);
   const [collections, setCollections] = useState([]);
-  const [selectedCollection, setSelectedCollection] = useState('');
-  const [selectedType, setSelectedType] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('');
-  const [zimSort, setZimSort] = useState('title'); // title, category, date
+  const [selectedCollection, setSelectedCollection] = useState(() => {
+    return searchParams.get('collection') || '';
+  });
+  const [selectedType, setSelectedType] = useState(() => {
+    return searchParams.get('type') || '';
+  });
+  const [selectedCategory, setSelectedCategory] = useState(() => {
+    return searchParams.get('category') || '';
+  });
+  const [zimSort, setZimSort] = useState(() => {
+    return searchParams.get('sort') || 'title';
+  });
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState(() => {
@@ -45,10 +53,18 @@ export default function GuestLibrary() {
     return () => window.removeEventListener('viewModeChanged', handleViewModeChange);
   }, []);
 
-  // Sync URL parameter when activeTab changes
+  // Sync URL parameters when filter states change
   useEffect(() => {
-    setSearchParams({ tab: activeTab }, { replace: true });
-  }, [activeTab, setSearchParams]);
+    const params = { tab: activeTab };
+
+    // Only include non-empty filter values in URL
+    if (selectedCollection) params.collection = selectedCollection;
+    if (selectedType) params.type = selectedType;
+    if (selectedCategory) params.category = selectedCategory;
+    if (zimSort !== 'title') params.sort = zimSort;
+
+    setSearchParams(params, { replace: true });
+  }, [activeTab, selectedCollection, selectedType, selectedCategory, zimSort, setSearchParams]);
 
   useEffect(() => {
     fetchContent();
