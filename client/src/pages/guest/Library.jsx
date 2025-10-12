@@ -74,11 +74,14 @@ export default function GuestLibrary() {
 
   // Update page title based on active tab
   useEffect(() => {
-    if (activeTab === 'uploads') {
-      document.title = 'SafeHarbor - Uploads';
-    } else {
-      document.title = 'SafeHarbor';
+    const newTitle = activeTab === 'uploads' ? 'SafeHarbor - Uploads' : 'SafeHarbor';
+
+    // Use replaceState to update the title on the current history entry
+    // This prevents creating duplicate "SafeHarbor" entries when browsing/filtering
+    if (window.history.state !== null) {
+      window.history.replaceState(window.history.state, newTitle);
     }
+    document.title = newTitle;
   }, [activeTab]);
 
   const fetchContent = async () => {
