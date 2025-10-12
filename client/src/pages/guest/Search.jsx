@@ -104,7 +104,7 @@ export default function GuestSearch() {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
         <button onClick={() => navigate('/')} className="btn btn-secondary">
           ← Back to Library
         </button>
@@ -184,21 +184,25 @@ export default function GuestSearch() {
                     onClick={() => handleOpenZimArticle(result)}
                     style={{ cursor: 'pointer' }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'start', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'start', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
                       <span style={{
                         background: 'var(--primary)',
                         color: 'white',
                         padding: '2px 8px',
                         borderRadius: '4px',
                         fontSize: '0.75rem',
-                        flexShrink: 0
+                        flexShrink: 0,
+                        maxWidth: '100%',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
                       }}>
                         {result.zimTitle}
                       </span>
                     </div>
-                    <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem' }}>{decodeHtml(result.title)}</h3>
+                    <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem', wordBreak: 'break-word' }}>{decodeHtml(result.title)}</h3>
                     {result.snippet && (
-                      <p className="text-muted" style={{ fontSize: '0.875rem' }}>
+                      <p className="text-muted" style={{ fontSize: '0.875rem', wordBreak: 'break-word' }}>
                         ...{result.snippet}...
                       </p>
                     )}
