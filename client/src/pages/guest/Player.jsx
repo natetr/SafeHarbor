@@ -80,7 +80,7 @@ export default function GuestPlayer() {
       return (
         <div style={{ textAlign: 'center', padding: '2rem' }}>
           <audio controls className="media-player" style={{ width: '100%', maxWidth: '600px' }}>
-            <source src={fileUrl} type={content.file_type} />
+            <source src={fileUrl} type={content.mime_type || 'audio/mpeg'} />
             Your browser does not support audio playback.
           </audio>
         </div>
