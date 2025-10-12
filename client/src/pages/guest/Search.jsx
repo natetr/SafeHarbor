@@ -147,7 +147,7 @@ export default function GuestSearch() {
                   transition: 'all 0.2s ease'
                 }}
               >
-                {library}
+                {decodeHtml(library)}
               </button>
             ))}
           </div>
