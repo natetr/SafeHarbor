@@ -904,6 +904,30 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       lastAddedZimId = result.lastInsertRowid;
       zimLogger.download.verbose('Marked as most recently added ZIM for crash detection', { zimId: result.lastInsertRowid });
 
+      // Check if auto-indexing is enabled
+      try {
+        const autoIndexSetting = await safeDbGet(
+          'SELECT value FROM system_settings WHERE key = ?',
+          ['auto_index_new_zims']
+        );
+
+        if (autoIndexSetting?.value === 'true') {
+          zimLogger.download.info(`Auto-indexing enabled - starting indexing for ${filename}`, { zimId: result.lastInsertRowid });
+          // Start indexing in background (don't await)
+          startZIMIndexing(result.lastInsertRowid, {
+            maxArticles: 0, // Unlimited
+            batchSize: 50
+          }).catch(err => {
+            zimLogger.download.error('Auto-indexing failed', {
+              zimId: result.lastInsertRowid,
+              error: err.message
+            });
+          });
+        }
+      } catch (err) {
+        zimLogger.download.error('Error checking auto-index setting', { error: err.message });
+      }
+
         // Schedule a restart - will wait for all downloads to complete
         zimLogger.download.info(`Download complete: ${filename} - scheduling Kiwix restart`, { zimId: result.lastInsertRowid });
         scheduleKiwixRestart(`load ${filename}`);
@@ -1349,6 +1373,8 @@ router.get('/search', async (req, res) => {
 
 // Proxy requests to Kiwix server
 router.get('/:id/content/*', async (req, res) => {
+  let streamDestroyed = false;
+
   try {
     const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
 
@@ -1357,19 +1383,120 @@ router.get('/:id/content/*', async (req, res) => {
     }
 
     const contentPath = req.params[0];
-    const kiwixUrl = `http://localhost:${KIWIX_PORT}/${library.filename}/${contentPath}`;
+    // Remove .zim extension from filename for kiwix-serve URL
+    const zimName = library.filename.replace('.zim', '');
+    const kiwixUrl = `http://localhost:${KIWIX_PORT}/content/${zimName}/${contentPath}`;
 
     const response = await axios({
       url: kiwixUrl,
       method: 'GET',
-      responseType: 'stream'
+      responseType: 'stream',
+      timeout: 30000, // 30 second timeout
+      validateStatus: (status) => status < 500, // Accept 4xx errors
+      maxRedirects: 5,
+      // Use http agent with keepAlive disabled to avoid connection reuse issues
+      httpAgent: new (await import('http')).default.Agent({
+        keepAlive: false
+      })
     });
 
-    res.set(response.headers);
-    response.data.pipe(res);
+    // Forward status and clean headers (remove problematic ones)
+    res.status(response.status);
+    const headers = { ...response.headers };
+    // Remove headers that can cause issues with streaming
+    delete headers['transfer-encoding'];
+    delete headers['connection'];
+    res.set(headers);
+
+    // Track if response has finished to prevent writing to closed stream
+    let responseFinished = false;
+    let streamErrorOccurred = false;
+
+    const finishHandler = () => {
+      responseFinished = true;
+      if (response.data && typeof response.data.destroy === 'function' && !streamDestroyed) {
+        streamDestroyed = true;
+        response.data.destroy();
+      }
+    };
+
+    res.on('finish', finishHandler);
+    res.on('close', finishHandler);
+    res.on('error', finishHandler);
+
+    // Handle stream errors from kiwix-serve
+    response.data.on('error', (streamErr) => {
+      if (streamErrorOccurred) return; // Prevent duplicate error handling
+      streamErrorOccurred = true;
+
+      console.error('Stream error from kiwix-serve:', streamErr.message);
+
+      if (!streamDestroyed) {
+        streamDestroyed = true;
+        response.data.destroy();
+      }
+
+      if (!responseFinished && !res.headersSent) {
+        res.status(500).json({ error: 'Stream error loading content' });
+      } else if (!responseFinished) {
+        try {
+          res.end();
+        } catch (e) {
+          // Ignore errors when ending already-ended stream
+        }
+      }
+    });
+
+    // Pipe with error handling
+    const pipe = response.data.pipe(res);
+
+    pipe.on('error', (pipeErr) => {
+      if (streamErrorOccurred) return; // Prevent duplicate error handling
+      streamErrorOccurred = true;
+
+      console.error('Pipe error:', pipeErr.message);
+
+      if (!streamDestroyed) {
+        streamDestroyed = true;
+        response.data.destroy();
+      }
+
+      if (!responseFinished && !res.headersSent) {
+        res.status(500).json({ error: 'Failed to stream content' });
+      } else if (!responseFinished) {
+        try {
+          res.end();
+        } catch (e) {
+          // Ignore errors when ending already-ended stream
+        }
+      }
+    });
+
+    // Handle 'end' event to ensure cleanup
+    response.data.on('end', () => {
+      if (!streamDestroyed) {
+        streamDestroyed = true;
+      }
+    });
+
   } catch (err) {
-    console.error('Proxy error:', err);
-    res.status(500).json({ error: 'Failed to load content' });
+    console.error('Proxy error:', err.message);
+
+    if (!res.headersSent) {
+      if (err.response) {
+        // Forward error status from kiwix-serve
+        res.status(err.response.status || 500).json({
+          error: 'Failed to load content from ZIM file',
+          details: err.message
+        });
+      } else if (err.code === 'ECONNREFUSED') {
+        res.status(503).json({ error: 'Kiwix server is not running' });
+      } else if (err.code === 'ETIMEDOUT') {
+        res.status(504).json({ error: 'Request to kiwix-serve timed out' });
+      } else {
+        res.status(500).json({ error: 'Failed to load content' });
+      }
+    }
   }
 });
 
@@ -2378,6 +2505,46 @@ router.get('/search/indexed', async (req, res) => {
     });
   } catch (err) {
     console.error('Search indexed articles error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get auto-indexing setting
+router.get('/settings/auto-index', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const setting = await safeDbGet(
+      'SELECT value FROM system_settings WHERE key = ?',
+      ['auto_index_new_zims']
+    );
+    res.json({
+      enabled: setting?.value === 'true'
+    });
+  } catch (err) {
+    console.error('Error getting auto-index setting:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Set auto-indexing setting
+router.put('/settings/auto-index', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { enabled } = req.body;
+
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled must be a boolean' });
+    }
+
+    await safeDbRun(
+      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)',
+      ['auto_index_new_zims', enabled ? 'true' : 'false']
+    );
+
+    res.json({
+      success: true,
+      enabled
+    });
+  } catch (err) {
+    console.error('Error setting auto-index setting:', err);
     res.status(500).json({ error: err.message });
   }
 });

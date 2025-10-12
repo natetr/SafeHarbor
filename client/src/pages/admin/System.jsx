@@ -4,9 +4,11 @@ export default function AdminSystem() {
   const [backingUp, setBackingUp] = useState(false);
   const [updateSettings, setUpdateSettings] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [autoIndexEnabled, setAutoIndexEnabled] = useState(false);
 
   useEffect(() => {
     fetchUpdateSettings();
+    fetchAutoIndexSetting();
   }, []);
 
   const fetchUpdateSettings = async () => {
@@ -90,6 +92,41 @@ export default function AdminSystem() {
     }
   };
 
+  const fetchAutoIndexSetting = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/settings/auto-index', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setAutoIndexEnabled(data.enabled);
+    } catch (err) {
+      console.error('Failed to fetch auto-index setting:', err);
+    }
+  };
+
+  const toggleAutoIndex = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/settings/auto-index', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ enabled: !autoIndexEnabled })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setAutoIndexEnabled(data.enabled);
+      }
+    } catch (err) {
+      console.error('Failed to toggle auto-index:', err);
+      alert('Failed to update auto-indexing setting');
+    }
+  };
+
   const handleChangePassword = () => {
     const currentPassword = prompt('Enter current password:');
     if (!currentPassword) return;
@@ -145,6 +182,36 @@ export default function AdminSystem() {
         <button onClick={handleChangePassword} className="btn btn-primary">
           Change Password
         </button>
+      </div>
+
+      <div className="card mb-3">
+        <h2 className="card-header">ZIM Indexing</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem' }}>Auto-Index New ZIMs</h3>
+            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+              {autoIndexEnabled ? (
+                <>
+                  <strong>ON:</strong> New ZIM files will be automatically indexed when downloaded.
+                  Benefits: Immediate search capability. Risks: May impact system performance during indexing.
+                </>
+              ) : (
+                <>
+                  <strong>OFF:</strong> You must manually start indexing for each ZIM file.
+                  Benefits: Control over when indexing happens. Risks: Search won't work until you index.
+                </>
+              )}
+            </p>
+          </div>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={autoIndexEnabled}
+              onChange={toggleAutoIndex}
+            />
+            <span className="slider"></span>
+          </label>
+        </div>
       </div>
 
       <div className="card mb-3">

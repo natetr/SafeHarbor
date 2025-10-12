@@ -1,5 +1,6 @@
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
+import { searchIndexedArticles } from './zimIndexingService.js';
 
 const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 
@@ -171,10 +172,10 @@ export async function searchContent(query, options = {}) {
         c.filename,
         c.size,
         c.created_at,
-        sf.rank as relevance,
-        snippet(sf, 1, '<mark>', '</mark>', '...', 32) as snippet
-      FROM search_fts sf
-      JOIN search_index si ON sf.rowid = si.id
+        search_fts.rank as relevance,
+        snippet(search_fts, 1, '<mark>', '</mark>', '...', 32) as snippet
+      FROM search_fts
+      JOIN search_index si ON search_fts.rowid = si.id
       JOIN content c ON si.content_id = c.id
       WHERE search_fts MATCH ?
     `;
@@ -233,7 +234,8 @@ export async function getSearchSuggestions(prefix, limit = 10) {
     // Use FTS5 prefix matching (term*)
     const ftsQuery = `${prefix}*`;
 
-    const results = await safeDbAll(`
+    // Get suggestions from content titles
+    const contentResults = await safeDbAll(`
       SELECT DISTINCT si.title
       FROM search_fts sf
       JOIN search_index si ON sf.rowid = si.id
@@ -241,7 +243,7 @@ export async function getSearchSuggestions(prefix, limit = 10) {
       LIMIT ?
     `, [ftsQuery, limit]);
 
-    // Also get suggestions from search history
+    // Get suggestions from search history
     const historyResults = await safeDbAll(`
       SELECT DISTINCT query, COUNT(*) as frequency
       FROM search_history
@@ -251,10 +253,33 @@ export async function getSearchSuggestions(prefix, limit = 10) {
       LIMIT ?
     `, [`${prefix}%`, limit]);
 
-    // Combine and deduplicate
+    // Get suggestions from ZIM article titles (FTS5)
+    const zimArticleResults = await safeDbAll(`
+      SELECT DISTINCT za.title
+      FROM zim_articles_fts zaf
+      JOIN zim_articles za ON zaf.rowid = za.id
+      WHERE zim_articles_fts MATCH ?
+      LIMIT ?
+    `, [ftsQuery, limit]);
+
+    // Get suggestions from ZIM library titles (simple LIKE)
+    const zimLibraryResults = await safeDbAll(`
+      SELECT DISTINCT title
+      FROM zim_libraries
+      WHERE title LIKE ? AND hidden = 0 AND status = 'active'
+      LIMIT ?
+    `, [`%${prefix}%`, limit]);
+
+    // Combine and deduplicate with priority:
+    // 1. Search history (most relevant to user)
+    // 2. Content titles
+    // 3. ZIM library titles
+    // 4. ZIM article titles (most numerous, so last)
     const suggestions = [
-      ...results.map(r => r.title),
-      ...historyResults.map(r => r.query)
+      ...historyResults.map(r => r.query),
+      ...contentResults.map(r => r.title),
+      ...zimLibraryResults.map(r => r.title),
+      ...zimArticleResults.map(r => r.title)
     ];
 
     return [...new Set(suggestions)].slice(0, limit);
@@ -542,6 +567,7 @@ export async function unifiedSearch(query, options = {}) {
     const {
       includeContent = true,
       includeZIM = true,
+      includeIndexedZIM = true,
       limit = 50,
       userId = null
     } = options;
@@ -549,6 +575,7 @@ export async function unifiedSearch(query, options = {}) {
     const results = {
       content: [],
       zim: [],
+      indexedZim: [],
       combined: []
     };
 
@@ -557,15 +584,23 @@ export async function unifiedSearch(query, options = {}) {
       results.content = await searchContent(query, options);
     }
 
-    // Search ZIM if enabled
+    // Search ZIM (kiwix-serve direct search) if enabled
     if (includeZIM) {
       results.zim = await searchZIM(query, options);
     }
 
+    // Search indexed ZIM articles (FTS5) if enabled
+    if (includeIndexedZIM) {
+      const indexedResults = await searchIndexedArticles(query, { limit: 100 });
+      results.indexedZim = indexedResults || [];
+    }
+
     // Combine and sort by relevance
-    // Content results have BM25 scores, ZIM results get position-based scores
+    // Content results and indexed ZIM have BM25 scores
+    // Kiwix-serve ZIM results get position-based scores
     results.combined = [
       ...results.content.map(r => ({ ...r, score: r.relevance || 1 })),
+      ...results.indexedZim.map(r => ({ ...r, score: r.relevance || 1 })),
       ...results.zim.map((r, idx) => ({ ...r, score: 1 / (idx + 1) })) // Position-based scoring
     ].sort((a, b) => b.score - a.score).slice(0, limit);
 
@@ -577,7 +612,72 @@ export async function unifiedSearch(query, options = {}) {
     return results;
   } catch (err) {
     console.error('Error in unified search:', err);
-    return { content: [], zim: [], combined: [] };
+    return { content: [], zim: [], indexedZim: [], combined: [] };
+  }
+}
+
+/**
+ * Search indexed ZIM articles using FTS5
+ * @param {string} query - Search query
+ * @param {Object} options - Search options
+ * @returns {Promise<Object>} Search results
+ */
+export async function searchIndexedZIMArticles(query, options = {}) {
+  try {
+    const { zimId = null, limit = 50, offset = 0 } = options;
+
+    if (!query || query.trim().length < 2) {
+      return { query, total: 0, results: [] };
+    }
+
+    // Build FTS5 query
+    let sql = `
+      SELECT
+        za.id,
+        za.zim_id,
+        za.article_url,
+        za.title,
+        zaf.rank as relevance,
+        snippet(zaf, 3, '<mark>', '</mark>', '...', 32) as snippet,
+        zl.title as zim_title
+      FROM zim_articles_fts zaf
+      JOIN zim_articles za ON zaf.rowid = za.id
+      JOIN zim_libraries zl ON za.zim_id = zl.id
+      WHERE zim_articles_fts MATCH ?
+    `;
+
+    const params = [query];
+
+    // Filter by ZIM if specified
+    if (zimId) {
+      sql += ' AND za.zim_id = ?';
+      params.push(zimId);
+    }
+
+    sql += ' ORDER BY rank LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const results = await safeDbAll(sql, params);
+
+    return {
+      query,
+      total: results.length,
+      results: results.map(r => ({
+        id: r.id,
+        zimId: r.zim_id,
+        zimTitle: r.zim_title,
+        title: r.title,
+        snippet: r.snippet || '',
+        // Return SafeHarbor proxy URL: /api/zim/:id/content/:path
+        // article_url is now just the path without /content/zimname/
+        url: `/api/zim/${r.zim_id}/content/${r.article_url}`,
+        relevance: -r.relevance, // FTS5 ranks are negative
+        type: 'zim-article-indexed'
+      }))
+    };
+  } catch (err) {
+    console.error('Error in searchIndexedZIMArticles:', err);
+    return { query, total: 0, results: [] };
   }
 }
 
@@ -592,5 +692,6 @@ export default {
   recordSearch,
   getPopularSearches,
   getRecentSearches,
-  clearExpiredCache
+  clearExpiredCache,
+  searchIndexedZIMArticles
 };

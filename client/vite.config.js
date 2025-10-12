@@ -23,11 +23,116 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:4000',
-        changeOrigin: true
+        changeOrigin: true,
+        configure: (proxy, _options) => {
+          // Global error handler for the proxy
+          proxy.on('error', (err, req, res) => {
+            console.log('Proxy error:', err.message);
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Proxy error' }));
+            } else if (!res.writableEnded) {
+              res.end();
+            }
+          });
+
+          // Handle errors on the proxy request
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.on('error', (err) => {
+              console.log('Proxy request error:', err.message);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Proxy request error' }));
+              } else if (!res.writableEnded) {
+                res.end();
+              }
+            });
+          });
+
+          // Handle errors on the proxy response
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            // Attach error handler to response stream
+            proxyRes.on('error', (err) => {
+              console.log('Proxy response stream error:', err.message);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Proxy response error' }));
+              } else if (!res.writableEnded) {
+                try {
+                  res.end();
+                } catch (e) {
+                  console.log('Error ending response:', e.message);
+                }
+              }
+            });
+
+            // Also attach error handler to the outgoing response
+            res.on('error', (err) => {
+              console.log('Client response error:', err.message);
+              if (!res.writableEnded) {
+                try {
+                  res.end();
+                } catch (e) {
+                  console.log('Error ending response after client error:', e.message);
+                }
+              }
+            });
+          });
+        }
       },
       '/content': {
         target: 'http://localhost:4000',
-        changeOrigin: true
+        changeOrigin: true,
+        configure: (proxy, _options) => {
+          proxy.on('error', (err, req, res) => {
+            console.log('Proxy error:', err.message);
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Proxy error' }));
+            } else if (!res.writableEnded) {
+              res.end();
+            }
+          });
+
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            proxyReq.on('error', (err) => {
+              console.log('Proxy request error:', err.message);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Proxy request error' }));
+              } else if (!res.writableEnded) {
+                res.end();
+              }
+            });
+          });
+
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            proxyRes.on('error', (err) => {
+              console.log('Proxy response stream error:', err.message);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Proxy response error' }));
+              } else if (!res.writableEnded) {
+                try {
+                  res.end();
+                } catch (e) {
+                  console.log('Error ending response:', e.message);
+                }
+              }
+            });
+
+            res.on('error', (err) => {
+              console.log('Client response error:', err.message);
+              if (!res.writableEnded) {
+                try {
+                  res.end();
+                } catch (e) {
+                  console.log('Error ending response after client error:', e.message);
+                }
+              }
+            });
+          });
+        }
       }
     }
   }
