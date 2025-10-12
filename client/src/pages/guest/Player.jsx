@@ -13,6 +13,15 @@ export default function GuestPlayer() {
     fetchContent();
   }, [id]);
 
+  // Update page title when content is loaded
+  useEffect(() => {
+    if (content) {
+      document.title = `SafeHarbor - Uploads - ${content.original_name}`;
+    } else {
+      document.title = 'SafeHarbor - Uploads';
+    }
+  }, [content]);
+
   const fetchContent = async () => {
     try {
       const token = localStorage.getItem('token');

@@ -72,6 +72,15 @@ export default function GuestLibrary() {
     fetchCollections();
   }, [selectedCollection, selectedType, viewAsGuest]);
 
+  // Update page title based on active tab
+  useEffect(() => {
+    if (activeTab === 'uploads') {
+      document.title = 'SafeHarbor - Uploads';
+    } else {
+      document.title = 'SafeHarbor';
+    }
+  }, [activeTab]);
+
   const fetchContent = async () => {
     try {
       let url = '/api/content';
