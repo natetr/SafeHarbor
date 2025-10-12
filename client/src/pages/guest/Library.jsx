@@ -132,7 +132,15 @@ export default function GuestLibrary() {
   };
 
   const handlePlayContent = (id) => {
-    navigate(`/play/${id}`, { state: { fromTab: activeTab } });
+    navigate(`/play/${id}`, {
+      state: {
+        fromTab: activeTab,
+        collection: selectedCollection,
+        type: selectedType,
+        category: selectedCategory,
+        sort: zimSort
+      }
+    });
   };
 
   const handleOpenZim = (zim) => {

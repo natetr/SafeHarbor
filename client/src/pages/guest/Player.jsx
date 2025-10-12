@@ -145,8 +145,19 @@ export default function GuestPlayer() {
   }
 
   const handleBackToLibrary = () => {
-    const fromTab = location.state?.fromTab || 'libraries';
-    navigate(`/?tab=${fromTab}`);
+    const state = location.state || {};
+    const params = new URLSearchParams();
+
+    // Always include tab
+    params.set('tab', state.fromTab || 'libraries');
+
+    // Include filter states if they exist
+    if (state.collection) params.set('collection', state.collection);
+    if (state.type) params.set('type', state.type);
+    if (state.category) params.set('category', state.category);
+    if (state.sort) params.set('sort', state.sort);
+
+    navigate(`/?${params.toString()}`);
   };
 
   if (error) {
