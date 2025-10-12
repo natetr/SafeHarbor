@@ -410,18 +410,19 @@ export default function AdminContent() {
         {content.length === 0 ? (
           <p className="text-muted">No content uploaded yet. Upload your first file above!</p>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Size</th>
-                <th>Collection</th>
-                <th>Visibility</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+          <div className="table-wrapper">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Size</th>
+                  <th>Collection</th>
+                  <th>Visibility</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
               {content.map(item => (
                 <tr key={item.id}>
                   <td style={{ maxWidth: '300px' }}>
@@ -533,8 +534,9 @@ export default function AdminContent() {
                   </td>
                 </tr>
               ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

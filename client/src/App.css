@@ -346,6 +346,11 @@ body {
   border-collapse: collapse;
 }
 
+.table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .table th,
 .table td {
   padding: 0.75rem;
@@ -431,5 +436,136 @@ body {
 
   .stats-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* Mobile: Make headers and actions stack vertically */
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.25rem;
+  }
+
+  /* Mobile: Fix flex-between to stack on small screens */
+  .flex-between {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  /* Mobile: Make buttons full width on mobile */
+  .flex-between > .btn,
+  .flex-between > button {
+    width: 100%;
+  }
+
+  /* Mobile: Horizontal scroll for tables */
+  .table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  .table thead,
+  .table tbody,
+  .table tr {
+    display: table;
+    width: 100%;
+    table-layout: fixed;
+  }
+
+  .table th,
+  .table td {
+    min-width: 100px;
+    font-size: 0.875rem;
+    padding: 0.5rem;
+  }
+
+  /* Mobile: Make action buttons stack */
+  .table td > div[style*="display: flex"] {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .table .btn-sm {
+    width: 100%;
+    margin-bottom: 0.25rem;
+  }
+
+  /* Mobile: Fix card inputs to not overflow */
+  .card input[type="text"],
+  .card input[type="url"],
+  .card select,
+  .card .form-input,
+  .card .form-select {
+    max-width: 100%;
+    font-size: 16px; /* Prevent zoom on iOS */
+  }
+
+  /* Mobile: Fix flex layouts with inputs */
+  .flex.gap-2,
+  .flex {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .flex > .btn,
+  .flex > button {
+    width: 100%;
+  }
+
+  .flex > input {
+    width: 100% !important;
+    flex: none !important;
+  }
+
+  /* Mobile: Fix search results cards */
+  .card {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  .card h3 {
+    font-size: 1rem;
+    word-wrap: break-word;
+  }
+
+  /* Mobile: Fix ZIM badge overflow */
+  .card span[style*="background: var(--primary)"] {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Mobile: Fix button groups in headers */
+  div[style*="display: flex"][style*="gap: 0.5rem"] {
+    flex-wrap: wrap;
+    gap: 0.5rem !important;
+  }
+
+  /* Mobile: Better spacing for multi-button rows */
+  div[style*="display: flex"][style*="gap: 0.5rem"] > .btn,
+  div[style*="display: flex"][style*="gap: 0.5rem"] > button {
+    flex: 1 1 auto;
+    min-width: fit-content;
+  }
+
+  /* Mobile: Fix search box */
+  .search-box {
+    max-width: 100%;
+    margin: 1rem 0;
+  }
+
+  .search-input {
+    font-size: 16px; /* Prevent zoom on iOS */
+    padding: 0.875rem 1rem;
+  }
+
+  /* Mobile: Fix library filter buttons */
+  div[style*="flexWrap: wrap"] > button {
+    font-size: 0.8125rem;
+    padding: 0.4rem 0.75rem;
   }
 }

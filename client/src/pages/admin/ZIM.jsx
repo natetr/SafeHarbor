@@ -426,7 +426,7 @@ export default function AdminZIM() {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+      <div className="flex-between mb-3">
         <h1 style={{ margin: 0 }}>ZIM Libraries</h1>
         <button
           onClick={() => window.location.href = '/admin/zim/logs'}
@@ -583,14 +583,15 @@ export default function AdminZIM() {
       })()}
 
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <div className="flex-between mb-3">
           <h2 className="card-header" style={{ margin: 0 }}>Installed Libraries ({libraries.length})</h2>
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div>
             {updateCheckStatus && (
-              <span style={{
-                fontSize: '0.9rem',
+              <div style={{
+                fontSize: '0.875rem',
                 color: updateCheckStatus.error ? '#dc3545' : updateCheckStatus.isRunning ? '#0d6efd' : '#198754',
-                marginRight: '0.5rem'
+                marginBottom: '0.5rem',
+                textAlign: 'left'
               }}>
                 {updateCheckStatus.error ? (
                   `Error: ${updateCheckStatus.error}`
@@ -601,28 +602,30 @@ export default function AdminZIM() {
                     ? `${updateCheckStatus.updatesAvailable} ZIM${updateCheckStatus.updatesAvailable === 1 ? '' : 's'} have updates`
                     : 'All ZIMs are up to date'
                 ) : null}
-              </span>
+              </div>
             )}
-            <button
-              onClick={() => navigate('/admin/zim/import')}
-              className="btn btn-secondary"
-            >
-              Import
-            </button>
-            <button
-              onClick={handleExport}
-              disabled={libraries.length === 0}
-              className="btn btn-secondary"
-            >
-              Export
-            </button>
-            <button
-              onClick={handleCheckUpdates}
-              disabled={checkingUpdates || libraries.length === 0}
-              className="btn btn-primary"
-            >
-              Check for Updates
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => navigate('/admin/zim/import')}
+                className="btn btn-secondary"
+              >
+                Import
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={libraries.length === 0}
+                className="btn btn-secondary"
+              >
+                Export
+              </button>
+              <button
+                onClick={handleCheckUpdates}
+                disabled={checkingUpdates || libraries.length === 0}
+                className="btn btn-primary"
+              >
+                Check for Updates
+              </button>
+            </div>
           </div>
         </div>
         {libraries.length === 0 ? (
@@ -634,19 +637,20 @@ export default function AdminZIM() {
             </p>
           </div>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>Language</th>
-                <th>Size</th>
-                <th>Articles</th>
-                <th>Last Updated</th>
-                <th style={{ textAlign: 'center' }}>Auto-Update</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+          <div className="table-wrapper">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Title</th>
+                  <th>Language</th>
+                  <th>Size</th>
+                  <th>Articles</th>
+                  <th>Last Updated</th>
+                  <th style={{ textAlign: 'center' }}>Auto-Update</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
               {libraries.map(lib => {
                 const hasUpdate = lib.available_update_url && lib.available_update_version;
                 const isUpdating = updatingZims.has(lib.id);
@@ -760,8 +764,9 @@ export default function AdminZIM() {
                   </tr>
                 );
               })}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
