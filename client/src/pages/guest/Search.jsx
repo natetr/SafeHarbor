@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
 
 export default function GuestSearch() {
@@ -25,21 +25,23 @@ export default function GuestSearch() {
       setQuery(q);
 
       // Parse filter selections from URL
-      if (filters) {
-        setSelectedLibraries(new Set(filters.split(',').filter(Boolean)));
+      const parsedFilters = filters ? new Set(filters.split(',').filter(Boolean)) : null;
+      if (parsedFilters) {
+        setSelectedLibraries(parsedFilters);
       }
 
-      performSearch(q);
+      performSearch(q, parsedFilters);
       // Update page title with search term
       document.title = `SafeHarbor - Search Results: "${q}"`;
     } else {
       document.title = 'SafeHarbor - Search';
     }
-  }, [searchParams.get('q')]);
+  }, [searchParams.get('q'), searchParams.get('filters')]);
 
-  // Fetch suggestions as user types
+  // Fetch suggestions as user types (but not on initial page load)
   useEffect(() => {
-    if (query.length >= 2 && !searchParams.get('q')) {
+    // Only show suggestions if the input is focused
+    if (query.length >= 2 && document.activeElement === searchInputRef.current) {
       const timer = setTimeout(async () => {
         try {
           const response = await fetch(`/api/search/suggestions?q=${encodeURIComponent(query)}&limit=8`);
@@ -71,7 +73,7 @@ export default function GuestSearch() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const performSearch = async (searchQuery) => {
+  const performSearch = async (searchQuery, existingFilters = null) => {
     if (!searchQuery || searchQuery.trim().length < 2) return;
 
     setLoading(true);
@@ -82,24 +84,55 @@ export default function GuestSearch() {
       const contentData = await contentResponse.json();
       setContentResults(contentData.results?.content || []);
 
-      // Search within ZIM files
+      // Search within ZIM files (kiwix-serve direct)
       const zimResponse = await fetch(`/api/zim/search?q=${encodeURIComponent(searchQuery)}`);
       const zimData = await zimResponse.json();
-      const allZimResults = zimData.results || [];
+      const kiwixResults = zimData.results || [];
+
+      // Search indexed ZIM articles (FTS5 full-text search)
+      const indexedResponse = await fetch(`/api/zim/search/indexed?q=${encodeURIComponent(searchQuery)}&limit=100`);
+      const indexedData = await indexedResponse.json();
+      const indexedResults = indexedData.results || [];
+
+      // Merge both ZIM result sets and deduplicate by URL
+      const zimResultsMap = new Map();
+      [...kiwixResults, ...indexedResults].forEach(result => {
+        const key = result.url || result.article_url;
+        // Prefer indexed results (better snippets and relevance scores)
+        if (!zimResultsMap.has(key) || result.type === 'zim-article-indexed') {
+          zimResultsMap.set(key, result);
+        }
+      });
+      const allZimResults = Array.from(zimResultsMap.values());
+
       setZimResults(allZimResults);
 
       // Extract unique library types/categories
       const libraries = [...new Set(allZimResults.map(r => r.zimCategory || r.zimTitle || 'Other'))];
       setAvailableLibraries(libraries.sort());
 
-      // Initialize filters if none set - select all by default
-      if (selectedLibraries.size === 0 && libraries.length > 0) {
+      // Initialize filters if none set and no existing filters provided - select all by default
+      // If existingFilters is provided (from URL), use those instead
+      if (existingFilters === null && selectedLibraries.size === 0 && libraries.length > 0) {
         setSelectedLibraries(new Set(libraries));
+      } else if (existingFilters && existingFilters.size > 0) {
+        // Filters from URL take precedence
+        setSelectedLibraries(existingFilters);
       }
     } catch (err) {
       console.error('Search failed:', err);
     } finally {
       setLoading(false);
+
+      // Restore scroll position after search completes and results are rendered
+      const savedScrollPosition = sessionStorage.getItem('searchScrollPosition');
+      if (savedScrollPosition) {
+        // Use setTimeout to ensure DOM is updated with results
+        setTimeout(() => {
+          window.scrollTo(0, parseInt(savedScrollPosition, 10));
+          sessionStorage.removeItem('searchScrollPosition');
+        }, 100);
+      }
     }
   };
 
@@ -134,13 +167,26 @@ export default function GuestSearch() {
     }
   };
 
-  const handleOpenContent = (id) => {
-    navigate(`/play/${id}`);
+  const getZimArticleUrl = (result) => {
+    // Generate proper URL for ZIM articles
+    // Bypass Vite proxy in dev mode to avoid stream errors
+    let url = result.url;
+
+    // Check if URL is already absolute (starts with http:// or https://)
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      // Already absolute, use as-is (direct to kiwix-serve)
+      return url;
+    } else {
+      // Relative URL, prepend backend URL in dev mode
+      return import.meta.env.DEV
+        ? `http://localhost:4000${url}`
+        : url;
+    }
   };
 
-  const handleOpenZimArticle = (result) => {
-    // Open ZIM article directly in new tab
-    window.open(result.url, '_blank');
+  const handleZimLinkClick = () => {
+    // Save scroll position before navigating to ZIM article
+    sessionStorage.setItem('searchScrollPosition', window.scrollY.toString());
   };
 
   const toggleLibraryFilter = (library) => {
@@ -323,11 +369,17 @@ export default function GuestSearch() {
               <h2 className="mb-2">From ZIM Libraries ({filteredZimResults.length})</h2>
               <div className="grid grid-1">
                 {filteredZimResults.map((result, idx) => (
-                  <div
+                  <a
                     key={idx}
+                    href={getZimArticleUrl(result)}
                     className="card"
-                    onClick={() => handleOpenZimArticle(result)}
-                    style={{ cursor: 'pointer' }}
+                    onClick={handleZimLinkClick}
+                    style={{
+                      cursor: 'pointer',
+                      textDecoration: 'none',
+                      color: 'inherit',
+                      display: 'block'
+                    }}
                   >
                     <div style={{ display: 'flex', alignItems: 'start', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
                       <span style={{
@@ -353,7 +405,7 @@ export default function GuestSearch() {
                         ...{highlightMatch(result.snippet, query)}...
                       </p>
                     )}
-                  </div>
+                  </a>
                 ))}
               </div>
             </div>
@@ -365,17 +417,18 @@ export default function GuestSearch() {
               <h2 className="mb-2">From Your Content ({contentResults.length})</h2>
               <div className="grid grid-3">
                 {contentResults.map((result) => (
-                  <div
+                  <Link
                     key={result.id}
+                    to={`/play/${result.id}`}
                     className="media-item"
-                    onClick={() => handleOpenContent(result.id)}
+                    style={{ textDecoration: 'none', color: 'inherit' }}
                   >
                     <div className="media-title">{highlightMatch(result.title, query)}</div>
                     <div className="media-meta">
                       <span style={{ textTransform: 'uppercase' }}>{result.fileType}</span>
                       {result.collection && <span> • {result.collection}</span>}
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             </div>
