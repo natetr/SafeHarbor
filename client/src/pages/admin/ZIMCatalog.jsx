@@ -17,7 +17,7 @@ export default function ZIMCatalog() {
   const [page, setPage] = useState(parseInt(searchParams.get('page')) || 1);
   const [searchQuery, setSearchQuery] = useState(searchParams.get('q') || '');
   const [selectedCategory, setSelectedCategory] = useState(searchParams.get('category') || '');
-  const [selectedLanguage, setSelectedLanguage] = useState(searchParams.get('lang') || '');
+  const [selectedLanguage, setSelectedLanguage] = useState(searchParams.get('lang') || 'eng');
   const [categories, setCategories] = useState([]);
   const [languages, setLanguages] = useState([]);
   const [sortBy, setSortBy] = useState(searchParams.get('sort') || 'name');
