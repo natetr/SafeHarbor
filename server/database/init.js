@@ -262,6 +262,8 @@ export function initDatabase() {
       available_update_media_count INTEGER,
       auto_update_enabled BOOLEAN DEFAULT 0,
       updated_date TEXT,
+      download_method TEXT DEFAULT 'http',
+      torrent_info_hash TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -341,6 +343,18 @@ export function initDatabase() {
   }
   try {
     db.exec(`ALTER TABLE zim_libraries ADD COLUMN available_update_media_count INTEGER`);
+  } catch (err) {
+    // Column already exists
+  }
+
+  // Add torrent support columns to existing zim_libraries table if they don't exist
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN download_method TEXT DEFAULT 'http'`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_libraries ADD COLUMN torrent_info_hash TEXT`);
   } catch (err) {
     // Column already exists
   }
@@ -663,6 +677,28 @@ export function initDatabase() {
   const autoIndexSetting = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('auto_index_new_zims');
   if (!autoIndexSetting) {
     db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('auto_index_new_zims', 'false');
+  }
+
+  // Initialize torrent settings if they don't exist
+  const torrentDefaultMethod = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('torrent_default_method');
+  if (!torrentDefaultMethod) {
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('torrent_default_method', 'torrent');
+  }
+
+  const torrentSeedEnabled = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('torrent_seed_enabled');
+  if (!torrentSeedEnabled) {
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('torrent_seed_enabled', 'true');
+  }
+
+  const torrentSeedDuration = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('torrent_seed_duration_hours');
+  if (!torrentSeedDuration) {
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('torrent_seed_duration_hours', '24');
+  }
+
+  const torrentMaxUploadSpeed = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('torrent_max_upload_speed');
+  if (!torrentMaxUploadSpeed) {
+    // Default 1 MB/s = 1048576 bytes/s
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('torrent_max_upload_speed', '1048576');
   }
 
   console.log('Database initialized successfully');

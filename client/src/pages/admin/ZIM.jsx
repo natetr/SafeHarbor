@@ -470,31 +470,72 @@ export default function AdminZIM() {
       {activeDownloads.length > 0 && (
         <div className="card mb-3">
           <h2 className="card-header">Active Downloads ({activeDownloads.length})</h2>
-          {activeDownloads.map(download => (
-            <div key={download.filename} className="mb-3" style={{ paddingBottom: '1rem', borderBottom: '1px solid var(--border)' }}>
-              <div className="flex-between mb-1">
-                <strong>{download.title}</strong>
-                <span>{download.progress}%</span>
-              </div>
-              <div style={{
-                width: '100%',
-                height: '8px',
-                background: 'var(--bg)',
-                borderRadius: '4px',
-                overflow: 'hidden'
-              }}>
+          {activeDownloads.map(download => {
+            const isTorrent = download.method === 'torrent';
+            const downloadSpeed = download.downloadSpeed || 0;
+            const uploadSpeed = download.uploadSpeed || 0;
+            const numPeers = download.numPeers || 0;
+            const timeRemaining = download.timeRemaining;
+
+            // Format time remaining
+            let etaText = '';
+            if (timeRemaining && timeRemaining > 0) {
+              const hours = Math.floor(timeRemaining / 3600000);
+              const minutes = Math.floor((timeRemaining % 3600000) / 60000);
+              if (hours > 0) {
+                etaText = `${hours}h ${minutes}m`;
+              } else {
+                etaText = `${minutes}m`;
+              }
+            }
+
+            return (
+              <div key={download.filename} className="mb-3" style={{ paddingBottom: '1rem', borderBottom: '1px solid var(--border)' }}>
+                <div className="flex-between mb-1">
+                  <div>
+                    <strong>{download.title}</strong>
+                    <span style={{
+                      marginLeft: '0.5rem',
+                      padding: '2px 6px',
+                      borderRadius: '3px',
+                      fontSize: '0.7rem',
+                      fontWeight: 'bold',
+                      background: isTorrent ? '#17a2b8' : '#6c757d',
+                      color: 'white'
+                    }}>
+                      {isTorrent ? 'TORRENT' : 'HTTP'}
+                    </span>
+                  </div>
+                  <span>{download.progress}%</span>
+                </div>
                 <div style={{
-                  width: `${download.progress}%`,
-                  height: '100%',
-                  background: 'var(--primary)',
-                  transition: 'width 0.3s ease'
-                }} />
+                  width: '100%',
+                  height: '8px',
+                  background: 'var(--bg)',
+                  borderRadius: '4px',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    width: `${download.progress}%`,
+                    height: '100%',
+                    background: 'var(--primary)',
+                    transition: 'width 0.3s ease'
+                  }} />
+                </div>
+                <div className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
+                  <div>{formatSize(download.downloadedSize)} / {formatSize(download.totalSize)} • {download.status}</div>
+                  {isTorrent && downloadSpeed > 0 && (
+                    <div style={{ marginTop: '0.25rem' }}>
+                      ↓ {(downloadSpeed / 1024 / 1024).toFixed(2)} MB/s
+                      {uploadSpeed > 0 && ` • ↑ ${(uploadSpeed / 1024 / 1024).toFixed(2)} MB/s`}
+                      {numPeers > 0 && ` • ${numPeers} peer${numPeers !== 1 ? 's' : ''}`}
+                      {etaText && ` • ETA: ${etaText}`}
+                    </div>
+                  )}
+                </div>
               </div>
-              <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
-                {formatSize(download.downloadedSize)} / {formatSize(download.totalSize)} • {download.status}
-              </p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

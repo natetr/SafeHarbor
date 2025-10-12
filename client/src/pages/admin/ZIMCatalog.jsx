@@ -22,6 +22,7 @@ export default function ZIMCatalog() {
   const [languages, setLanguages] = useState([]);
   const [sortBy, setSortBy] = useState(searchParams.get('sort') || 'name');
   const [sortDirection, setSortDirection] = useState(searchParams.get('dir') || 'asc');
+  const [downloadMethod, setDownloadMethod] = useState('torrent'); // 'torrent' or 'http'
   const itemsPerPage = 50;
 
   // Fetch available languages and installed libraries on mount
@@ -163,7 +164,8 @@ export default function ZIMCatalog() {
           size: item.size,
           articleCount: item.articleCount,
           mediaCount: item.mediaCount,
-          updated: item.updated
+          updated: item.updated,
+          method: downloadMethod
         })
       });
 
@@ -258,6 +260,42 @@ export default function ZIMCatalog() {
       </div>
 
       <StorageInfo />
+
+      {/* Download Method Selector */}
+      <div className="card mb-3">
+        <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem', fontWeight: '600' }}>Download Method</h3>
+        <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+          <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+            <input
+              type="radio"
+              value="torrent"
+              checked={downloadMethod === 'torrent'}
+              onChange={(e) => setDownloadMethod(e.target.value)}
+              style={{ marginRight: '0.5rem', cursor: 'pointer' }}
+            />
+            <span style={{ fontWeight: downloadMethod === 'torrent' ? 'bold' : 'normal' }}>
+              Torrent (Recommended)
+            </span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+            <input
+              type="radio"
+              value="http"
+              checked={downloadMethod === 'http'}
+              onChange={(e) => setDownloadMethod(e.target.value)}
+              style={{ marginRight: '0.5rem', cursor: 'pointer' }}
+            />
+            <span style={{ fontWeight: downloadMethod === 'http' ? 'bold' : 'normal' }}>
+              Direct Download
+            </span>
+          </label>
+        </div>
+        <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem', marginBottom: 0 }}>
+          {downloadMethod === 'torrent'
+            ? '✓ Torrent downloads are resumable, reliable for large files, and reduce server load.'
+            : 'ℹ️ Direct downloads are faster for small files but cannot resume if interrupted.'}
+        </p>
+      </div>
 
       {/* Search and Filters */}
       <div className="card mb-3">

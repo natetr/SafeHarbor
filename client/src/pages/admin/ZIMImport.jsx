@@ -16,6 +16,7 @@ export default function ZIMImport() {
   const [installedLibraries, setInstalledLibraries] = useState([]);
   const [storage, setStorage] = useState(null);
   const [networkMode, setNetworkMode] = useState(null);
+  const [downloadMethod, setDownloadMethod] = useState('torrent'); // 'torrent' or 'http'
 
   useEffect(() => {
     fetchInstalledLibraries();
@@ -205,7 +206,8 @@ export default function ZIMImport() {
             size: zim.size,
             articleCount: zim.articleCount,
             mediaCount: zim.mediaCount,
-            updated: zim.updated
+            updated: zim.updated,
+            method: downloadMethod
           })
         });
 
@@ -306,6 +308,44 @@ export default function ZIMImport() {
           </button>
         </div>
       </div>
+
+      {/* Download Method Selector - shown after loading ZIMs */}
+      {zims.length > 0 && (
+        <div className="card mb-3">
+          <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem', fontWeight: '600' }}>Download Method</h3>
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+              <input
+                type="radio"
+                value="torrent"
+                checked={downloadMethod === 'torrent'}
+                onChange={(e) => setDownloadMethod(e.target.value)}
+                style={{ marginRight: '0.5rem', cursor: 'pointer' }}
+              />
+              <span style={{ fontWeight: downloadMethod === 'torrent' ? 'bold' : 'normal' }}>
+                Torrent (Recommended)
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+              <input
+                type="radio"
+                value="http"
+                checked={downloadMethod === 'http'}
+                onChange={(e) => setDownloadMethod(e.target.value)}
+                style={{ marginRight: '0.5rem', cursor: 'pointer' }}
+              />
+              <span style={{ fontWeight: downloadMethod === 'http' ? 'bold' : 'normal' }}>
+                Direct Download
+              </span>
+            </label>
+          </div>
+          <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem', marginBottom: 0 }}>
+            {downloadMethod === 'torrent'
+              ? '✓ Torrent downloads are resumable and ideal for batch operations with multiple large files.'
+              : 'ℹ️ Direct downloads work for small batches but may fail on network interruption.'}
+          </p>
+        </div>
+      )}
 
       {/* ZIM Review Section */}
       {zims.length > 0 && (

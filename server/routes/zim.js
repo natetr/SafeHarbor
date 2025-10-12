@@ -8,6 +8,15 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import si from 'systeminformation';
 import { zimLogger, startOperation, endOperation } from '../utils/zimLogger.js';
+import {
+  downloadViaTorrent,
+  getTorrentUrl,
+  verifyTorrentExists,
+  getTorrentStatus,
+  getAllTorrentStatuses,
+  stopTorrent,
+  updateTorrentConfig
+} from '../services/torrentDownloadService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -633,7 +642,7 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
   let operationId;
 
   try {
-    const { url, title, description, language, size, articleCount, mediaCount, updated } = req.body;
+    const { url, title, description, language, size, articleCount, mediaCount, updated, method } = req.body;
 
     if (!url) {
       zimLogger.download.error('Download request missing URL');
@@ -644,10 +653,26 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
     filepath = path.join(ZIM_DIR, filename);
     operationId = `download-${filename}-${Date.now()}`;
 
-    // Start operation tracking
-    startOperation(operationId, 'download', { url, filename, title, size });
+    // Determine download method: default to system setting, allow override
+    let downloadMethod = method; // explicit method from client
+    if (!downloadMethod) {
+      // Check system settings for default
+      const defaultMethodSetting = await safeDbGet(
+        'SELECT value FROM system_settings WHERE key = ?',
+        ['torrent_default_method']
+      );
+      downloadMethod = defaultMethodSetting?.value || 'torrent';
+    }
 
-    zimLogger.download.detail('Validating download request', { url, filename, expectedSize: size });
+    zimLogger.download.detail('Validating download request', {
+      url,
+      filename,
+      expectedSize: size,
+      method: downloadMethod
+    });
+
+    // Start operation tracking
+    startOperation(operationId, 'download', { url, filename, title, size, method: downloadMethod });
 
     // Validate URL format
     try {
@@ -702,7 +727,11 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
     }
 
     // Initialize download tracking
-    zimLogger.download.info(`Starting download: ${title || filename}`, { url, size: size ? `${(size / 1024 / 1024 / 1024).toFixed(2)}GB` : 'Unknown' });
+    zimLogger.download.info(`Starting download: ${title || filename}`, {
+      url,
+      size: size ? `${(size / 1024 / 1024 / 1024).toFixed(2)}GB` : 'Unknown',
+      method: downloadMethod
+    });
     activeDownloads.set(filename, {
       url,
       filename,
@@ -711,23 +740,156 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       totalSize: size || 0, // Use size from catalog
       downloadedSize: 0,
       status: 'starting',
-      startTime: Date.now()
+      startTime: Date.now(),
+      method: downloadMethod,
+      downloadSpeed: 0,
+      uploadSpeed: 0,
+      numPeers: 0
     });
 
     // Log download start to database
     await zimLogger.download.logStart({
       zimTitle: title || filename,
       zimFilename: filename,
-      details: `URL: ${url}, Size: ${size ? (size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
+      details: `Method: ${downloadMethod}, URL: ${url}, Size: ${size ? (size / 1024 / 1024 / 1024).toFixed(2) + ' GB' : 'Unknown'}`,
       userId: req.user?.id
     });
 
     // Start download in background
     res.json({
       message: 'Download started',
-      filename
+      filename,
+      method: downloadMethod
     });
 
+    // === TORRENT DOWNLOAD PATH ===
+    if (downloadMethod === 'torrent') {
+      try {
+        // Get torrent URL
+        const torrentUrl = getTorrentUrl(url);
+        zimLogger.download.info(`Attempting torrent download`, { torrentUrl });
+
+        // Verify torrent exists
+        const torrentExists = await verifyTorrentExists(torrentUrl);
+        if (!torrentExists) {
+          zimLogger.download.warn(`Torrent file not found, falling back to HTTP`, { torrentUrl });
+          // Fall through to HTTP download
+        } else {
+          // Start torrent download
+          const downloadedFilepath = await downloadViaTorrent(
+            torrentUrl,
+            ZIM_DIR,
+            { title, filename, size },
+            (progressData) => {
+              // Update active downloads with torrent progress
+              const download = activeDownloads.get(filename);
+              if (download) {
+                download.progress = progressData.progress;
+                download.downloadedSize = progressData.downloaded;
+                download.totalSize = progressData.total;
+                download.downloadSpeed = progressData.downloadSpeed;
+                download.uploadSpeed = progressData.uploadSpeed;
+                download.numPeers = progressData.numPeers;
+                download.timeRemaining = progressData.timeRemaining;
+                download.status = 'downloading';
+              }
+            }
+          );
+
+          // Torrent download complete
+          const downloadDuration = activeDownloads.get(filename)
+            ? Math.round((Date.now() - activeDownloads.get(filename).startTime) / 1000)
+            : null;
+          activeDownloads.delete(filename);
+
+          // Get file size from filesystem
+          let fileSize = size || null;
+          try {
+            const stats = fs.statSync(downloadedFilepath);
+            fileSize = stats.size;
+            zimLogger.download.success('Torrent download complete', {
+              filename,
+              size: `${(fileSize / 1024 / 1024).toFixed(2)}MB`,
+              duration: `${downloadDuration}s`
+            });
+          } catch (err) {
+            zimLogger.download.error('File validation error after torrent download', { filename, error: err.message });
+            throw err;
+          }
+
+          // Add to database with status='active' and download_method='torrent'
+          const result = await safeDbRun(`
+            INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status, download_method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'torrent')
+          `, [
+            filename,
+            downloadedFilepath,
+            title || filename,
+            description || null,
+            language || null,
+            fileSize,
+            articleCount || null,
+            mediaCount || null,
+            url,
+            updated || null
+          ]);
+
+          // Log download completion
+          await zimLogger.download.logComplete({
+            zimTitle: title || filename,
+            zimFilename: filename,
+            zimId: result.lastInsertRowid,
+            details: `Torrent download - Language: ${language || 'Unknown'}, Articles: ${articleCount?.toLocaleString() || 'N/A'}`,
+            userId: req.user?.id,
+            fileSize: fileSize,
+            downloadDuration: downloadDuration
+          });
+
+          // Track this as the most recently added ZIM for crash detection
+          lastAddedZimId = result.lastInsertRowid;
+
+          // Check if auto-indexing is enabled
+          try {
+            const autoIndexSetting = await safeDbGet(
+              'SELECT value FROM system_settings WHERE key = ?',
+              ['auto_index_new_zims']
+            );
+
+            if (autoIndexSetting?.value === 'true') {
+              zimLogger.download.info(`Auto-indexing enabled - starting indexing for ${filename}`, { zimId: result.lastInsertRowid });
+              const { startZIMIndexing } = await import('../services/zimIndexingService.js');
+              startZIMIndexing(result.lastInsertRowid, {
+                maxArticles: 0,
+                batchSize: 50
+              }).catch(err => {
+                zimLogger.download.error('Auto-indexing failed', {
+                  zimId: result.lastInsertRowid,
+                  error: err.message
+                });
+              });
+            }
+          } catch (err) {
+            zimLogger.download.warn('Could not check auto-indexing setting', { error: err.message });
+          }
+
+          zimLogger.download.success('ZIM file ready', { filename, zimId: result.lastInsertRowid });
+          endOperation(operationId, true);
+
+          // Restart Kiwix to load new ZIM
+          scheduleKiwixRestart();
+          return; // Exit early - torrent download complete
+        }
+      } catch (torrentErr) {
+        zimLogger.download.error('Torrent download failed, falling back to HTTP', {
+          error: torrentErr.message,
+          filename
+        });
+        // Fall through to HTTP download as fallback
+        activeDownloads.get(filename).method = 'http'; // Update method
+      }
+    }
+
+    // === HTTP DOWNLOAD PATH (original logic) ===
     // Download file
     zimLogger.download.detail('Creating file write stream', { filepath });
     const writer = fs.createWriteStream(filepath);
@@ -876,8 +1038,8 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       // Add to database with status='active'
       zimLogger.download.detail('Inserting ZIM into database', { filename, title, language });
       const result = db.prepare(`
-        INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status, download_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'http')
       `).run(
         filename,
         filepath,
@@ -1013,13 +1175,58 @@ router.get('/download/progress', authenticateToken, requireAdmin, (req, res) => 
       downloadedSize: d.downloadedSize,
       status: d.status,
       isUpdate: d.isUpdate || false,
-      originalId: d.originalId || null
+      originalId: d.originalId || null,
+      method: d.method || 'http',
+      downloadSpeed: d.downloadSpeed || 0,
+      uploadSpeed: d.uploadSpeed || 0,
+      numPeers: d.numPeers || 0,
+      timeRemaining: d.timeRemaining || null
     }));
 
     res.json(downloads);
   } catch (err) {
     console.error('Error fetching download progress:', err);
     res.status(500).json({ error: 'Failed to fetch progress' });
+  }
+});
+
+// Get torrent status for a specific download
+router.get('/download/torrent-status/:filename', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { filename } = req.params;
+    const status = getTorrentStatus(filename);
+
+    if (!status) {
+      return res.status(404).json({ error: 'Torrent not found' });
+    }
+
+    res.json(status);
+  } catch (err) {
+    console.error('Error fetching torrent status:', err);
+    res.status(500).json({ error: 'Failed to fetch torrent status' });
+  }
+});
+
+// Get all active torrents
+router.get('/download/torrents', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const torrents = getAllTorrentStatuses();
+    res.json(torrents);
+  } catch (err) {
+    console.error('Error fetching torrents:', err);
+    res.status(500).json({ error: 'Failed to fetch torrents' });
+  }
+});
+
+// Stop a torrent
+router.post('/download/torrent-stop/:filename', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { filename } = req.params;
+    stopTorrent(filename);
+    res.json({ message: 'Torrent stopped', filename });
+  } catch (err) {
+    console.error('Error stopping torrent:', err);
+    res.status(500).json({ error: 'Failed to stop torrent' });
   }
 });
 
@@ -1086,6 +1293,79 @@ router.patch('/update-settings', authenticateToken, requireAdmin, (req, res) => 
   } catch (err) {
     console.error('Update settings error:', err);
     res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Get torrent settings
+router.get('/torrent-settings', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const settings = {};
+
+    // Fetch all torrent-related settings
+    const defaultMethod = await safeDbGet('SELECT value FROM system_settings WHERE key = ?', ['torrent_default_method']);
+    settings.defaultMethod = defaultMethod?.value || 'torrent';
+
+    const seedEnabled = await safeDbGet('SELECT value FROM system_settings WHERE key = ?', ['torrent_seed_enabled']);
+    settings.seedEnabled = seedEnabled?.value === 'true';
+
+    const seedDuration = await safeDbGet('SELECT value FROM system_settings WHERE key = ?', ['torrent_seed_duration_hours']);
+    settings.seedDurationHours = parseInt(seedDuration?.value || '24');
+
+    const maxUploadSpeed = await safeDbGet('SELECT value FROM system_settings WHERE key = ?', ['torrent_max_upload_speed']);
+    settings.maxUploadSpeed = parseInt(maxUploadSpeed?.value || '1048576');
+
+    res.json(settings);
+  } catch (err) {
+    console.error('Error fetching torrent settings:', err);
+    res.status(500).json({ error: 'Failed to fetch torrent settings' });
+  }
+});
+
+// Update torrent settings
+router.patch('/torrent-settings', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { defaultMethod, seedEnabled, seedDurationHours, maxUploadSpeed } = req.body;
+
+    // Update each setting if provided
+    if (defaultMethod !== undefined) {
+      await safeDbRun(
+        'UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?',
+        [defaultMethod, new Date().toISOString(), 'torrent_default_method']
+      );
+    }
+
+    if (seedEnabled !== undefined) {
+      await safeDbRun(
+        'UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?',
+        [seedEnabled ? 'true' : 'false', new Date().toISOString(), 'torrent_seed_enabled']
+      );
+    }
+
+    if (seedDurationHours !== undefined) {
+      await safeDbRun(
+        'UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?',
+        [seedDurationHours.toString(), new Date().toISOString(), 'torrent_seed_duration_hours']
+      );
+    }
+
+    if (maxUploadSpeed !== undefined) {
+      await safeDbRun(
+        'UPDATE system_settings SET value = ?, updated_at = ? WHERE key = ?',
+        [maxUploadSpeed.toString(), new Date().toISOString(), 'torrent_max_upload_speed']
+      );
+    }
+
+    // Update the torrent service configuration
+    updateTorrentConfig({
+      seedAfterDownload: seedEnabled !== undefined ? seedEnabled : undefined,
+      seedDurationHours: seedDurationHours !== undefined ? seedDurationHours : undefined,
+      maxUploadSpeed: maxUploadSpeed !== undefined ? maxUploadSpeed : undefined
+    });
+
+    res.json({ message: 'Torrent settings saved successfully' });
+  } catch (err) {
+    console.error('Error updating torrent settings:', err);
+    res.status(500).json({ error: 'Failed to update torrent settings' });
   }
 });
 
