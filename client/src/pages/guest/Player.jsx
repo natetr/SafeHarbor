@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 
 export default function GuestPlayer() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [content, setContent] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -143,12 +144,17 @@ export default function GuestPlayer() {
     );
   }
 
+  const handleBackToLibrary = () => {
+    const fromTab = location.state?.fromTab || 'libraries';
+    navigate(`/?tab=${fromTab}`);
+  };
+
   if (error) {
     return (
       <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
         <h2>Error</h2>
         <p className="text-muted">{error}</p>
-        <button onClick={() => navigate('/library')} className="btn btn-primary mt-3">
+        <button onClick={handleBackToLibrary} className="btn btn-primary mt-3">
           Back to Library
         </button>
       </div>
@@ -159,7 +165,7 @@ export default function GuestPlayer() {
     <div>
       <div className="flex-between mb-3">
         <h1 style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{content.original_name}</h1>
-        <button onClick={() => navigate('/library')} className="btn btn-secondary" style={{ flexShrink: 0 }}>
+        <button onClick={handleBackToLibrary} className="btn btn-secondary" style={{ flexShrink: 0 }}>
           Back to Library
         </button>
       </div>
