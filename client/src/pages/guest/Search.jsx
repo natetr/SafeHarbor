@@ -79,36 +79,22 @@ export default function GuestSearch() {
     setLoading(true);
     setShowSuggestions(false);
     try {
-      // Search content
-      const contentResponse = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
-      const contentData = await contentResponse.json();
-      setContentResults(contentData.results?.content || []);
+      // Use unified search endpoint which handles weighted scoring on backend
+      const response = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}&limit=100`);
+      const data = await response.json();
 
-      // Search within ZIM files (kiwix-serve direct)
-      const zimResponse = await fetch(`/api/zim/search?q=${encodeURIComponent(searchQuery)}`);
-      const zimData = await zimResponse.json();
-      const kiwixResults = zimData.results || [];
+      // The unified search returns combined results already sorted by weighted relevance
+      const combinedResults = data.results?.combined || [];
 
-      // Search indexed ZIM articles (FTS5 full-text search)
-      const indexedResponse = await fetch(`/api/zim/search/indexed?q=${encodeURIComponent(searchQuery)}&limit=100`);
-      const indexedData = await indexedResponse.json();
-      const indexedResults = indexedData.results || [];
+      // Separate content from ZIM results for display
+      const content = combinedResults.filter(r => r.type === 'content');
+      const zim = combinedResults.filter(r => r.type === 'zim-article' || r.type === 'zim-article-indexed');
 
-      // Merge both ZIM result sets and deduplicate by URL
-      const zimResultsMap = new Map();
-      [...kiwixResults, ...indexedResults].forEach(result => {
-        const key = result.url || result.article_url;
-        // Prefer indexed results (better snippets and relevance scores)
-        if (!zimResultsMap.has(key) || result.type === 'zim-article-indexed') {
-          zimResultsMap.set(key, result);
-        }
-      });
-      const allZimResults = Array.from(zimResultsMap.values());
-
-      setZimResults(allZimResults);
+      setContentResults(content);
+      setZimResults(zim);
 
       // Extract unique library types/categories
-      const libraries = [...new Set(allZimResults.map(r => r.zimCategory || r.zimTitle || 'Other'))];
+      const libraries = [...new Set(zim.map(r => r.zimCategory || r.zimTitle || 'Other'))];
       setAvailableLibraries(libraries.sort());
 
       // Initialize filters if none set and no existing filters provided - select all by default
