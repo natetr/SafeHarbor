@@ -2280,6 +2280,108 @@ router.post('/import', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// ===========================================================================
+// ZIM ARTICLE INDEXING - Deep content search
+// ===========================================================================
+
+import {
+  startZIMIndexing,
+  getIndexingStatus,
+  getAllIndexingStatuses,
+  cancelIndexing,
+  clearIndexedArticles,
+  searchIndexedArticles
+} from '../services/zimIndexingService.js';
+
+// Start indexing a ZIM
+router.post('/:id/index', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { maxArticles = 10000, batchSize = 50 } = req.body;
+    const hostname = req.get('host').split(':')[0];
+
+    const result = await startZIMIndexing(parseInt(req.params.id), {
+      maxArticles,
+      batchSize,
+      hostname
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('Start indexing error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get indexing status for a ZIM
+router.get('/:id/index/status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const status = await getIndexingStatus(parseInt(req.params.id));
+    res.json(status || { status: 'not_indexed' });
+  } catch (err) {
+    console.error('Get indexing status error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get all indexing statuses
+router.get('/index/statuses', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const statuses = await getAllIndexingStatuses();
+    res.json(statuses);
+  } catch (err) {
+    console.error('Get all indexing statuses error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cancel indexing for a ZIM
+router.post('/:id/index/cancel', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await cancelIndexing(parseInt(req.params.id));
+    res.json(result);
+  } catch (err) {
+    console.error('Cancel indexing error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear indexed articles for a ZIM
+router.delete('/:id/index', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await clearIndexedArticles(parseInt(req.params.id));
+    res.json(result);
+  } catch (err) {
+    console.error('Clear indexed articles error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Search indexed ZIM articles
+router.get('/search/indexed', async (req, res) => {
+  try {
+    const { q, zimId, limit = 50, offset = 0 } = req.query;
+
+    if (!q || q.trim().length < 2) {
+      return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+    }
+
+    const results = await searchIndexedArticles(q, {
+      zimId: zimId ? parseInt(zimId) : null,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    res.json({
+      query: q,
+      total: results.length,
+      results
+    });
+  } catch (err) {
+    console.error('Search indexed articles error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Export startKiwixServer and restartKiwixServer so they can be called after DB init
 export { startKiwixServer, restartKiwixServer };
 
