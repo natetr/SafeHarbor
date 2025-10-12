@@ -7,6 +7,7 @@ export default function GuestLayout({ user, onLogout }) {
     const saved = localStorage.getItem('viewAsGuest');
     return saved !== null ? saved === 'true' : true;
   });
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const isAdmin = user?.role === 'admin';
 
@@ -29,7 +30,31 @@ export default function GuestLayout({ user, onLogout }) {
             </svg>
             SafeHarbor
           </Link>
-          <div className="navbar-menu">
+
+          {/* Hamburger menu button - visible on mobile */}
+          <button
+            className="mobile-menu-toggle"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-label="Toggle menu"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {mobileMenuOpen ? (
+                <>
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </>
+              ) : (
+                <>
+                  <line x1="3" y1="12" x2="21" y2="12"></line>
+                  <line x1="3" y1="6" x2="21" y2="6"></line>
+                  <line x1="3" y1="18" x2="21" y2="18"></line>
+                </>
+              )}
+            </svg>
+          </button>
+
+          {/* Desktop menu */}
+          <div className="navbar-menu navbar-menu-desktop">
             <Link to="/" className="navbar-link">Library</Link>
             {isAdmin && (
               <>
@@ -97,6 +122,76 @@ export default function GuestLayout({ user, onLogout }) {
               <Link to="/login" className="btn btn-sm btn-primary">Admin Login</Link>
             )}
           </div>
+
+          {/* Mobile dropdown menu */}
+          {mobileMenuOpen && (
+            <div className="navbar-menu-mobile">
+              <Link to="/" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Library</Link>
+              {isAdmin && (
+                <>
+                  <Link to="/admin" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Admin</Link>
+                  {/* Mobile Admin/Guest View Toggle */}
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '0.75rem 1rem',
+                    borderBottom: '1px solid var(--border)'
+                  }}>
+                    <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+                      View as: {viewAsGuest ? 'Guest' : 'Admin'}
+                    </span>
+                    <label style={{
+                      position: 'relative',
+                      display: 'inline-block',
+                      width: '44px',
+                      height: '24px',
+                      cursor: 'pointer'
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={viewAsGuest}
+                        onChange={(e) => setViewAsGuest(e.target.checked)}
+                        style={{
+                          opacity: 0,
+                          width: 0,
+                          height: 0
+                        }}
+                      />
+                      <span style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        backgroundColor: viewAsGuest ? 'var(--warning)' : 'var(--success)',
+                        borderRadius: '24px',
+                        transition: 'background-color 0.3s',
+                        cursor: 'pointer'
+                      }}>
+                        <span style={{
+                          position: 'absolute',
+                          content: '',
+                          height: '18px',
+                          width: '18px',
+                          left: viewAsGuest ? '23px' : '3px',
+                          bottom: '3px',
+                          backgroundColor: 'white',
+                          borderRadius: '50%',
+                          transition: 'left 0.3s'
+                        }} />
+                      </span>
+                    </label>
+                  </div>
+                </>
+              )}
+              {user ? (
+                <button onClick={() => { onLogout(); setMobileMenuOpen(false); }} className="btn btn-sm btn-secondary" style={{ width: '100%', margin: '0.5rem 1rem', maxWidth: 'calc(100% - 2rem)' }}>Logout</button>
+              ) : (
+                <Link to="/login" className="btn btn-sm btn-primary" onClick={() => setMobileMenuOpen(false)} style={{ width: '100%', margin: '0.5rem 1rem', maxWidth: 'calc(100% - 2rem)', textAlign: 'center' }}>Admin Login</Link>
+              )}
+            </div>
+          )}
         </div>
       </nav>
       <main className="main-content">

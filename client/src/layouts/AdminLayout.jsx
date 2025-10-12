@@ -1,6 +1,9 @@
 import { Outlet, Link } from 'react-router-dom';
+import { useState } from 'react';
 
 export default function AdminLayout({ user, onLogout }) {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
   return (
     <div className="layout">
       <nav className="navbar">
@@ -14,7 +17,31 @@ export default function AdminLayout({ user, onLogout }) {
             </svg>
             SafeHarbor Admin
           </Link>
-          <div className="navbar-menu">
+
+          {/* Hamburger menu button - visible on mobile */}
+          <button
+            className="mobile-menu-toggle"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-label="Toggle menu"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {mobileMenuOpen ? (
+                <>
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </>
+              ) : (
+                <>
+                  <line x1="3" y1="12" x2="21" y2="12"></line>
+                  <line x1="3" y1="6" x2="21" y2="6"></line>
+                  <line x1="3" y1="18" x2="21" y2="18"></line>
+                </>
+              )}
+            </svg>
+          </button>
+
+          {/* Desktop menu */}
+          <div className="navbar-menu navbar-menu-desktop">
             <Link to="/admin" className="navbar-link">Dashboard</Link>
             <Link to="/admin/content" className="navbar-link">Content</Link>
             <Link to="/admin/zim" className="navbar-link">ZIM Libraries</Link>
@@ -23,6 +50,19 @@ export default function AdminLayout({ user, onLogout }) {
             <Link to="/" className="navbar-link">Guest View</Link>
             <button onClick={onLogout} className="btn btn-sm btn-danger">Logout</button>
           </div>
+
+          {/* Mobile dropdown menu */}
+          {mobileMenuOpen && (
+            <div className="navbar-menu-mobile">
+              <Link to="/admin" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Dashboard</Link>
+              <Link to="/admin/content" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Content</Link>
+              <Link to="/admin/zim" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>ZIM Libraries</Link>
+              <Link to="/admin/network" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Network</Link>
+              <Link to="/admin/system" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>System</Link>
+              <Link to="/" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Guest View</Link>
+              <button onClick={() => { onLogout(); setMobileMenuOpen(false); }} className="btn btn-sm btn-danger" style={{ width: '100%', margin: '0.5rem 1rem', maxWidth: 'calc(100% - 2rem)' }}>Logout</button>
+            </div>
+          )}
         </div>
       </nav>
       <main className="main-content">
