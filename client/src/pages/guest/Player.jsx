@@ -75,11 +75,20 @@ export default function GuestPlayer() {
       );
     }
 
-    // Audio files
-    if (fileType.includes('audio')) {
+    // Audio files (check both file_type and mime_type)
+    if (fileType.includes('audio') || mimeType.includes('audio')) {
       return (
-        <div style={{ textAlign: 'center', padding: '2rem' }}>
-          <audio controls className="media-player" style={{ width: '100%', maxWidth: '600px' }}>
+        <div style={{ textAlign: 'center', padding: '2rem', width: '100%' }}>
+          <audio
+            controls
+            className="media-player"
+            style={{
+              width: '100%',
+              maxWidth: '600px',
+              display: 'block',
+              margin: '0 auto'
+            }}
+          >
             <source src={fileUrl} type={content.mime_type || 'audio/mpeg'} />
             Your browser does not support audio playback.
           </audio>
