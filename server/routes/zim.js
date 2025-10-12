@@ -431,8 +431,16 @@ router.get('/', optionalAuth, async (req, res) => {
       // Build full URL pointing directly to kiwix-serve port
       const contentUrl = `${kiwixBaseUrl}${contentPath}`;
 
-      // Build full icon URL if available
-      const iconUrl = catalogEntry?.icon ? `${kiwixBaseUrl}${catalogEntry.icon}` : null;
+      // Build full icon URL with fallback to ZIM favicon
+      let iconUrl;
+      if (catalogEntry?.icon) {
+        // Use catalog icon if available
+        iconUrl = `${kiwixBaseUrl}${catalogEntry.icon}`;
+      } else {
+        // Fallback to ZIM's own favicon (try common paths)
+        // Different ZIMs may have different favicon formats
+        iconUrl = `${kiwixBaseUrl}${contentPath}/favicon.png`;
+      }
 
       return {
         ...lib,
@@ -482,7 +490,7 @@ function parseCatalogXml(xml) {
     const linkMatch = entry.match(/<link[^>]*type="text\/html"[^>]*href="([^"]*)"/);
     const contentPath = linkMatch ? linkMatch[1] : null;
 
-    // Extract icon URL specifically from <link rel="http://opds-spec.org/image" ...> tag
+    // Extract icon URL from <link rel="http://opds-spec.org/image..." ...> tag
     const iconMatch = entry.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/image[^"]*"[^>]*href="([^"]*)"/);
     const iconPath = iconMatch ? iconMatch[1] : null;
 

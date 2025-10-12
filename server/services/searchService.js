@@ -595,13 +595,24 @@ export async function unifiedSearch(query, options = {}) {
       results.indexedZim = indexedResults || [];
     }
 
-    // Combine and sort by relevance
-    // Content results and indexed ZIM have BM25 scores
-    // Kiwix-serve ZIM results get position-based scores
+    // Combine and sort by relevance with weighted scoring
+    // Strategy: Boost indexed content (has full-text relevance) over title-only matches
+    // - Indexed ZIM articles (FTS5): 2.0× boost (full content matching with BM25)
+    // - Content results (FTS5): 1.5× boost (local content)
+    // - Kiwix-serve results: 0.5× scale (title-only matches, position-based)
     results.combined = [
-      ...results.content.map(r => ({ ...r, score: r.relevance || 1 })),
-      ...results.indexedZim.map(r => ({ ...r, score: r.relevance || 1 })),
-      ...results.zim.map((r, idx) => ({ ...r, score: 1 / (idx + 1) })) // Position-based scoring
+      ...results.content.map(r => ({
+        ...r,
+        score: (Math.abs(r.relevance) || 1) * 1.5 // Boost content results
+      })),
+      ...results.indexedZim.map(r => ({
+        ...r,
+        score: (Math.abs(r.relevance) || 1) * 2.0 // Boost indexed ZIM (full content matching)
+      })),
+      ...results.zim.map((r, idx) => ({
+        ...r,
+        score: (1 / (idx + 1)) * 0.5 // Reduce kiwix-serve title-only matches
+      }))
     ].sort((a, b) => b.score - a.score).slice(0, limit);
 
     // Record search in history
