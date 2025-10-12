@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
 
 export default function GuestLibrary() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [content, setContent] = useState([]);
   const [zims, setZims] = useState([]);
   const [collections, setCollections] = useState([]);
@@ -12,7 +13,10 @@ export default function GuestLibrary() {
   const [zimSort, setZimSort] = useState('title'); // title, category, date
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState('libraries'); // 'libraries' or 'uploads'
+  const [activeTab, setActiveTab] = useState(() => {
+    // Initialize from URL parameter, default to 'libraries'
+    return searchParams.get('tab') || 'libraries';
+  });
   const [isAdmin, setIsAdmin] = useState(false);
   const [viewAsGuest, setViewAsGuest] = useState(() => {
     // Default to guest view (true)
@@ -40,6 +44,11 @@ export default function GuestLibrary() {
     window.addEventListener('viewModeChanged', handleViewModeChange);
     return () => window.removeEventListener('viewModeChanged', handleViewModeChange);
   }, []);
+
+  // Sync URL parameter when activeTab changes
+  useEffect(() => {
+    setSearchParams({ tab: activeTab }, { replace: true });
+  }, [activeTab, setSearchParams]);
 
   useEffect(() => {
     fetchContent();
@@ -107,7 +116,7 @@ export default function GuestLibrary() {
   };
 
   const handlePlayContent = (id) => {
-    navigate(`/play/${id}`);
+    navigate(`/play/${id}`, { state: { fromTab: activeTab } });
   };
 
   const handleOpenZim = (zim) => {
