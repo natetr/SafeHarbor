@@ -637,6 +637,34 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add ZIM indexing statistics columns
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN total_entries INTEGER DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN redirect_count INTEGER DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN actual_article_count INTEGER DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN memory_usage_bytes INTEGER DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+
+  // Initialize auto-indexing setting (default: off)
+  const autoIndexSetting = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('auto_index_new_zims');
+  if (!autoIndexSetting) {
+    db.prepare('INSERT INTO system_settings (key, value) VALUES (?, ?)').run('auto_index_new_zims', 'false');
+  }
+
   console.log('Database initialized successfully');
 }
 

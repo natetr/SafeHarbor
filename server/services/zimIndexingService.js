@@ -1,5 +1,7 @@
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
+import { Archive } from '@openzim/libzim';
+import path from 'path';
 
 const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 
@@ -20,7 +22,7 @@ const activeJobs = new Map(); // zimId -> jobInfo
 export async function startZIMIndexing(zimId, options = {}) {
   try {
     const {
-      maxArticles = 10000, // Limit articles to prevent memory issues on Raspberry Pi
+      maxArticles = process.env.ZIM_INDEX_MAX_ARTICLES ? parseInt(process.env.ZIM_INDEX_MAX_ARTICLES) : 0, // 0 = unlimited
       batchSize = 50, // Process in batches
       hostname = 'localhost'
     } = options;
@@ -62,11 +64,15 @@ export async function startZIMIndexing(zimId, options = {}) {
     indexZIMArticles(zim, { maxArticles, batchSize, hostname, jobInfo })
       .then(async () => {
         console.log(`✓ Completed indexing for ZIM: ${zim.title}`);
+
+        // Calculate final memory usage
+        const memoryUsage = await calculateMemoryUsage(zimId);
+
         await safeDbRun(`
           UPDATE zim_indexing_status
-          SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+          SET status = 'completed', completed_at = CURRENT_TIMESTAMP, memory_usage_bytes = ?
           WHERE zim_id = ?
-        `, [zimId]);
+        `, [memoryUsage, zimId]);
         activeJobs.delete(zimId);
       })
       .catch(async (err) => {
@@ -87,60 +93,197 @@ export async function startZIMIndexing(zimId, options = {}) {
 }
 
 /**
+ * Discover articles using direct ZIM file access via libzim
+ * @param {string} zimPath - Full path to ZIM file
+ * @param {number} maxArticles - Maximum articles to discover
+ * @returns {Promise<Object>} Object containing article paths and statistics
+ */
+async function discoverArticlesViaLibzim(zimPath, maxArticles) {
+  try {
+    console.log(`Opening ZIM file directly: ${zimPath}`);
+    const archive = new Archive(zimPath);
+
+    // Get ZIM metadata
+    const totalEntries = archive.entryCount;
+    const allEntries = archive.allEntryCount;
+    const reportedArticles = archive.articleCount;
+
+    console.log(`ZIM metadata:`);
+    console.log(`  - Total entries: ${totalEntries.toLocaleString()}`);
+    console.log(`  - All entries: ${allEntries.toLocaleString()}`);
+    console.log(`  - Article count (from metadata): ${reportedArticles.toLocaleString()}`);
+
+    const articles = [];
+    let articleCount = 0;
+    let redirectCount = 0;
+    let otherCount = 0;
+    let totalProcessed = 0;
+
+    // Iterate through all entries and collect articles
+    for (const entry of archive.iterByPath()) {
+      totalProcessed++;
+
+      // Track entry types
+      if (entry.isRedirect) {
+        redirectCount++;
+        continue; // Skip redirects - we want actual content to avoid duplicates
+      }
+
+      // Store the article path
+      articles.push(entry.path);
+      articleCount++;
+
+      // Log progress every 1000 articles
+      if (articleCount % 1000 === 0) {
+        console.log(`  Progress: ${articleCount.toLocaleString()} articles, ${redirectCount.toLocaleString()} redirects discovered...`);
+      }
+
+      // Respect maxArticles limit
+      if (maxArticles > 0 && articleCount >= maxArticles) {
+        console.log(`  Reached maxArticles limit of ${maxArticles}`);
+        break;
+      }
+    }
+
+    // Calculate other entries (non-articles, non-redirects like images, CSS, etc.)
+    otherCount = totalProcessed - articleCount - redirectCount;
+
+    console.log(`✓ Discovery complete:`);
+    console.log(`  - Articles (actual content): ${articleCount.toLocaleString()}`);
+    console.log(`  - Redirects (excluded): ${redirectCount.toLocaleString()}`);
+    console.log(`  - Other entries: ${otherCount.toLocaleString()}`);
+    console.log(`  - Total processed: ${totalProcessed.toLocaleString()}`);
+
+    return {
+      articles,
+      stats: {
+        totalEntries,
+        articleCount,
+        redirectCount,
+        otherCount,
+        totalProcessed
+      }
+    };
+  } catch (err) {
+    console.error('Error discovering articles via libzim:', err);
+    throw err;
+  }
+}
+
+/**
+ * Discover articles using kiwix-serve search (fallback method)
+ * @param {string} zimName - ZIM filename without extension
+ * @param {number} maxArticles - Maximum articles to discover
+ * @returns {Promise<Set>} Set of article URLs
+ */
+async function discoverArticlesViaSearch(zimName, maxArticles) {
+  const kiwixBaseUrl = `http://localhost:${KIWIX_PORT}`;
+  const searchTerms = [
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'
+  ];
+  const discoveredArticles = new Set();
+  const pageLength = 500;
+  const maxPagesPerTerm = 4;
+
+  console.log(`Discovering articles via kiwix-serve search (fallback method)...`);
+
+  for (const term of searchTerms) {
+    for (let page = 0; page < maxPagesPerTerm; page++) {
+      try {
+        const start = page * pageLength;
+        const searchUrl = `${kiwixBaseUrl}/search?pattern=${encodeURIComponent(term)}&content=${encodeURIComponent(zimName)}&pageLength=${pageLength}&start=${start}`;
+        const searchResponse = await axios.get(searchUrl, { timeout: 10000 });
+
+        const searchLinks = extractArticleLinks(searchResponse.data, zimName);
+
+        if (searchLinks.length === 0) break;
+
+        searchLinks.forEach(link => discoveredArticles.add(link));
+
+        if (discoveredArticles.size >= maxArticles) break;
+      } catch (err) {
+        console.error(`Search failed for term "${term}" page ${page}:`, err.message);
+        break;
+      }
+    }
+
+    if (discoveredArticles.size >= maxArticles) break;
+  }
+
+  console.log(`✓ Discovered ${discoveredArticles.size} articles via search`);
+  return discoveredArticles;
+}
+
+/**
  * Index articles from a ZIM file
  */
 async function indexZIMArticles(zim, options) {
   const { maxArticles, batchSize, hostname, jobInfo } = options;
 
   try {
-    // Strategy: Use kiwix-serve to discover and fetch articles
-    // We'll use a combination of random article browsing and sitemap crawling
-
     const zimName = zim.filename.replace('.zim', '');
     const kiwixBaseUrl = `http://localhost:${KIWIX_PORT}`;
 
-    // Step 1: Try to fetch the ZIM's main page to understand structure
-    console.log(`Fetching main page for ${zim.title}...`);
-    const mainPage = await axios.get(`${kiwixBaseUrl}/${zimName}/`, {
-      timeout: 10000
-    }).catch(() => null);
+    console.log(`Discovering articles for ${zim.title}...`);
 
-    if (!mainPage) {
-      throw new Error('Could not access ZIM main page');
+    let articlesToIndex = [];
+
+    let discoveryStats = null;
+
+    // Try direct ZIM file access first (preferred method)
+    try {
+      // Construct full path to ZIM file
+      // Check if filepath is already absolute or relative
+      const zimPath = path.isAbsolute(zim.filepath)
+        ? zim.filepath
+        : path.join(process.cwd(), zim.filepath);
+
+      const discoveryResult = await discoverArticlesViaLibzim(zimPath, maxArticles);
+      discoveryStats = discoveryResult.stats;
+
+      // Store just the article path without /content/zimname/ prefix
+      // libzim returns paths like "100%_renewable_energy"
+      // We'll construct the full URL when serving results
+      articlesToIndex = discoveryResult.articles;
+
+      console.log(`✓ Using direct ZIM access: discovered ${articlesToIndex.length} articles`);
+    } catch (libzimError) {
+      // Fallback to search-based discovery
+      console.warn(`Direct ZIM access failed: ${libzimError.message}`);
+      console.log(`Falling back to search-based discovery...`);
+
+      const discoveredArticles = await discoverArticlesViaSearch(zimName, maxArticles);
+      articlesToIndex = Array.from(discoveredArticles).slice(0, maxArticles);
+
+      console.log(`✓ Using search-based fallback: discovered ${articlesToIndex.length} articles`);
     }
-
-    // Step 2: Extract article links from main page
-    const articleLinks = extractArticleLinks(mainPage.data, zimName);
-    console.log(`Found ${articleLinks.length} article links on main page`);
-
-    // Step 3: Use search to discover more articles (search for common terms)
-    const searchTerms = ['a', 'e', 'i', 'o', 'u', 'the', 'and', 'of', 'to', 'in'];
-    const discoveredArticles = new Set(articleLinks);
-
-    for (const term of searchTerms) {
-      try {
-        const searchUrl = `${kiwixBaseUrl}/search?pattern=${encodeURIComponent(term)}&content=${encodeURIComponent(zimName)}&pageLength=100`;
-        const searchResponse = await axios.get(searchUrl, { timeout: 10000 });
-
-        const searchLinks = extractArticleLinks(searchResponse.data, zimName);
-        searchLinks.forEach(link => discoveredArticles.add(link));
-
-        console.log(`Discovered ${discoveredArticles.size} unique articles so far`);
-
-        if (discoveredArticles.size >= maxArticles) break;
-      } catch (err) {
-        console.error(`Search failed for term "${term}":`, err.message);
-      }
-    }
-
-    const articlesToIndex = Array.from(discoveredArticles).slice(0, maxArticles);
     jobInfo.total = articlesToIndex.length;
 
-    await safeDbRun(`
-      UPDATE zim_indexing_status
-      SET total_articles = ?
-      WHERE zim_id = ?
-    `, [articlesToIndex.length, zim.id]);
+    // Update status with discovery statistics
+    if (discoveryStats) {
+      await safeDbRun(`
+        UPDATE zim_indexing_status
+        SET total_articles = ?,
+            total_entries = ?,
+            redirect_count = ?,
+            actual_article_count = ?
+        WHERE zim_id = ?
+      `, [
+        articlesToIndex.length,
+        discoveryStats.totalEntries,
+        discoveryStats.redirectCount,
+        discoveryStats.articleCount,
+        zim.id
+      ]);
+    } else {
+      await safeDbRun(`
+        UPDATE zim_indexing_status
+        SET total_articles = ?
+        WHERE zim_id = ?
+      `, [articlesToIndex.length, zim.id]);
+    }
 
     console.log(`Indexing ${articlesToIndex.length} articles from ${zim.title}...`);
 
@@ -186,19 +329,23 @@ async function indexZIMArticles(zim, options) {
  */
 function extractArticleLinks(html, zimName) {
   const links = [];
-  const linkPattern = new RegExp(`href="/(${zimName}/[^"#?]+)"`, 'gi');
+  // kiwix-serve uses /content/ prefix for article URLs
+  const linkPattern = new RegExp(`href="(/content/${zimName}/[^"#?]+)"`, 'gi');
   let match;
 
   while ((match = linkPattern.exec(html)) !== null) {
     const url = match[1];
-    // Skip non-article pages
+    // Skip non-article pages and assets
     if (!url.includes('/search') &&
         !url.includes('/random') &&
         !url.includes('/suggest') &&
         !url.includes('.css') &&
         !url.includes('.js') &&
         !url.includes('.png') &&
-        !url.includes('.jpg')) {
+        !url.includes('.jpg') &&
+        !url.includes('.svg') &&
+        !url.includes('.ico') &&
+        !url.includes('.woff')) {
       links.push(url);
     }
   }
@@ -209,10 +356,16 @@ function extractArticleLinks(html, zimName) {
 /**
  * Index a single article
  */
-async function indexSingleArticle(zim, articleUrl, baseUrl) {
+async function indexSingleArticle(zim, articlePath, baseUrl) {
   try {
+    // Construct kiwix-serve URL
+    // articlePath is just the path like "How_to_Blow_Up_a_Pipeline"
+    // kiwix-serve expects /content/zimname/path
+    const zimName = zim.filename.replace('.zim', '');
+    const kiwixUrl = `${baseUrl}/content/${zimName}/${articlePath}`;
+
     // Fetch article content
-    const response = await axios.get(`${baseUrl}/${articleUrl}`, {
+    const response = await axios.get(kiwixUrl, {
       timeout: 5000,
       headers: { 'Accept': 'text/html' }
     });
@@ -221,7 +374,7 @@ async function indexSingleArticle(zim, articleUrl, baseUrl) {
 
     // Extract title
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-    const title = titleMatch ? stripHtml(titleMatch[1]) : articleUrl.split('/').pop();
+    const title = titleMatch ? stripHtml(titleMatch[1]) : articlePath.split('/').pop();
 
     // Extract main content (try multiple selectors)
     let content = '';
@@ -250,9 +403,10 @@ async function indexSingleArticle(zim, articleUrl, baseUrl) {
     const snippet = content.substring(0, 200).trim();
 
     // Check if article already exists
+    // Store the clean article path (without /content/zimname/ prefix)
     const existing = await safeDbGet(
       'SELECT id FROM zim_articles WHERE zim_id = ? AND article_url = ?',
-      [zim.id, articleUrl]
+      [zim.id, articlePath]
     );
 
     if (existing) {
@@ -267,7 +421,7 @@ async function indexSingleArticle(zim, articleUrl, baseUrl) {
       await safeDbRun(`
         INSERT INTO zim_articles (zim_id, article_url, title, content, snippet)
         VALUES (?, ?, ?, ?, ?)
-      `, [zim.id, articleUrl, title, content, snippet]);
+      `, [zim.id, articlePath, title, content, snippet]);
     }
   } catch (err) {
     if (err.response?.status === 404) {
@@ -297,6 +451,26 @@ function stripHtml(html) {
 }
 
 /**
+ * Calculate memory usage for indexed articles
+ */
+async function calculateMemoryUsage(zimId) {
+  try {
+    const result = await safeDbGet(`
+      SELECT
+        COUNT(*) as article_count,
+        SUM(LENGTH(title) + LENGTH(content) + LENGTH(snippet)) as total_bytes
+      FROM zim_articles
+      WHERE zim_id = ?
+    `, [zimId]);
+
+    return result?.total_bytes || 0;
+  } catch (err) {
+    console.error('Error calculating memory usage:', err);
+    return 0;
+  }
+}
+
+/**
  * Get indexing status for a ZIM
  */
 export async function getIndexingStatus(zimId) {
@@ -309,8 +483,15 @@ export async function getIndexingStatus(zimId) {
     // Also check if there's an active job
     const activeJob = activeJobs.get(zimId);
 
+    // Calculate current memory usage if indexed
+    let memoryUsage = status?.memory_usage_bytes || 0;
+    if (status && status.indexed_articles > 0) {
+      memoryUsage = await calculateMemoryUsage(zimId);
+    }
+
     return {
       ...status,
+      memory_usage_bytes: memoryUsage,
       isActive: !!activeJob,
       currentProgress: activeJob?.indexed || status?.indexed_articles || 0
     };
@@ -398,9 +579,7 @@ export async function searchIndexedArticles(query, options = {}) {
         za.title,
         za.snippet,
         zl.title as zim_title,
-        zl.category as zim_category,
-        zaf.rank as relevance,
-        snippet(zaf, 1, '<mark>', '</mark>', '...', 32) as highlighted_snippet
+        zaf.rank as relevance
       FROM zim_articles_fts zaf
       JOIN zim_articles za ON zaf.rowid = za.id
       JOIN zim_libraries zl ON za.zim_id = zl.id
@@ -423,10 +602,11 @@ export async function searchIndexedArticles(query, options = {}) {
       id: row.id,
       zimId: row.zim_id,
       zimTitle: row.zim_title,
-      zimCategory: row.zim_category || 'Other',
+      zimCategory: row.zim_title, // Use zimTitle as category since category column doesn't exist
       title: row.title,
-      snippet: row.highlighted_snippet || row.snippet,
-      url: row.article_url,
+      snippet: row.snippet || '',
+      // Return SafeHarbor proxy URL: /api/zim/:id/content/:path
+      url: `/api/zim/${row.zim_id}/content/${row.article_url}`,
       relevance: Math.abs(row.relevance),
       type: 'zim-article-indexed'
     }));

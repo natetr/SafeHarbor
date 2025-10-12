@@ -6,10 +6,20 @@ export default function ZIMIndexing() {
   const [indexingStatuses, setIndexingStatuses] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [autoIndexEnabled, setAutoIndexEnabled] = useState(false);
+
+  // Helper function to decode HTML entities
+  const decodeHtmlEntities = (text) => {
+    if (!text) return text;
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = text;
+    return textarea.value;
+  };
 
   useEffect(() => {
     fetchLibraries();
     fetchIndexingStatuses();
+    fetchAutoIndexSetting();
 
     // Poll for status updates every 5 seconds
     const interval = setInterval(fetchIndexingStatuses, 5000);
@@ -39,6 +49,41 @@ export default function ZIMIndexing() {
       setIndexingStatuses(data);
     } catch (err) {
       console.error('Failed to fetch indexing statuses:', err);
+    }
+  };
+
+  const fetchAutoIndexSetting = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/settings/auto-index', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setAutoIndexEnabled(data.enabled);
+    } catch (err) {
+      console.error('Failed to fetch auto-index setting:', err);
+    }
+  };
+
+  const toggleAutoIndex = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/settings/auto-index', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ enabled: !autoIndexEnabled })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setAutoIndexEnabled(data.enabled);
+      }
+    } catch (err) {
+      console.error('Failed to toggle auto-index:', err);
+      alert('Failed to update auto-indexing setting');
     }
   };
 
@@ -141,6 +186,39 @@ export default function ZIMIndexing() {
       <div className="alert alert-info" style={{ marginBottom: '1.5rem' }}>
         <strong>How indexing works:</strong> Indexing extracts article content from ZIM files and stores it in a searchable database.
         This enables powerful full-text search with relevance ranking. Large ZIMs may take several minutes to index.
+        <br /><br />
+        <strong>About article counts:</strong> ZIM files contain actual articles plus redirects (aliases pointing to articles).
+        Indexing processes only actual articles to avoid duplicates - redirects are automatically resolved when accessed.
+      </div>
+
+      {/* Auto-Indexing Setting */}
+      <div className="card" style={{ marginBottom: '1.5rem', padding: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem' }}>Auto-Index New ZIMs</h3>
+            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+              {autoIndexEnabled ? (
+                <>
+                  <strong>ON:</strong> New ZIM files will be automatically indexed when downloaded.
+                  Benefits: Immediate search capability. Risks: May impact system performance during indexing.
+                </>
+              ) : (
+                <>
+                  <strong>OFF:</strong> You must manually start indexing for each ZIM file.
+                  Benefits: Control over when indexing happens. Risks: Search won't work until you index.
+                </>
+              )}
+            </p>
+          </div>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={autoIndexEnabled}
+              onChange={toggleAutoIndex}
+            />
+            <span className="slider"></span>
+          </label>
+        </div>
       </div>
 
       {error && (
@@ -159,6 +237,7 @@ export default function ZIMIndexing() {
                 <th>Status</th>
                 <th>Progress</th>
                 <th>Articles</th>
+                <th>Memory Usage</th>
                 <th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
@@ -172,9 +251,22 @@ export default function ZIMIndexing() {
                   <tr key={lib.id}>
                     <td>
                       <div>
-                        <div style={{ fontWeight: '500' }}>{lib.title}</div>
+                        <div style={{ fontWeight: '500' }}>{decodeHtmlEntities(lib.title)}</div>
                         <div className="text-muted" style={{ fontSize: '0.875rem' }}>
-                          {formatSize(lib.size)} • {lib.article_count?.toLocaleString()} articles
+                          {formatSize(lib.size)}
+                          {status?.actual_article_count > 0 ? (
+                            <>
+                              {' • '}
+                              {status.actual_article_count.toLocaleString()} articles
+                              {status.redirect_count > 0 && (
+                                <span title={`${status.redirect_count.toLocaleString()} redirects excluded to prevent duplicates`}>
+                                  {' '}({status.total_entries.toLocaleString()} entries incl. redirects)
+                                </span>
+                              )}
+                            </>
+                          ) : lib.article_count ? (
+                            <> • {lib.article_count.toLocaleString()} articles</>
+                          ) : null}
                         </div>
                       </div>
                     </td>
@@ -230,6 +322,13 @@ export default function ZIMIndexing() {
                         <span className="text-muted">—</span>
                       )}
                     </td>
+                    <td>
+                      {status && status.memory_usage_bytes > 0 ? (
+                        <span>{formatSize(status.memory_usage_bytes)}</span>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
+                    </td>
                     <td style={{ textAlign: 'right' }}>
                       <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
                         {isIndexing ? (
@@ -243,8 +342,8 @@ export default function ZIMIndexing() {
                           <>
                             <button
                               onClick={() => {
-                                const max = prompt('Max articles to index (default: 10000):', '10000');
-                                if (max) startIndexing(lib.id, max);
+                                const max = prompt('Max articles to index (0 = unlimited, recommended):', '0');
+                                if (max !== null) startIndexing(lib.id, max || '0');
                               }}
                               disabled={loading}
                               className="btn btn-sm btn-primary"
@@ -304,10 +403,11 @@ export default function ZIMIndexing() {
       <div className="card">
         <h2 style={{ marginBottom: '1rem' }}>Tips for Indexing</h2>
         <ul style={{ paddingLeft: '1.5rem', lineHeight: '1.8' }}>
-          <li><strong>Start small:</strong> Begin with 1,000-5,000 articles to test performance</li>
-          <li><strong>Raspberry Pi:</strong> Limit to 5,000-10,000 articles for optimal performance</li>
+          <li><strong>Recommended:</strong> Use unlimited (0) to index all articles for best search results</li>
+          <li><strong>Raspberry Pi:</strong> If performance is slow, you can limit to 10,000-20,000 articles</li>
           <li><strong>Storage:</strong> Indexed articles use ~50-200MB per 10,000 articles</li>
-          <li><strong>Search quality:</strong> More indexed articles = better search results</li>
+          <li><strong>Background processing:</strong> Indexing continues even if you navigate away from this page</li>
+          <li><strong>Article counts:</strong> Only actual articles are indexed; redirects are excluded to prevent duplicates</li>
         </ul>
       </div>
     </div>
