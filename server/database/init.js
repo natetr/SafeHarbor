@@ -390,7 +390,7 @@ export function initDatabase() {
     )
   `);
 
-  // Search index table
+  // Search index table - enhanced with more fields
   db.exec(`
     CREATE TABLE IF NOT EXISTS search_index (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,27 +399,35 @@ export function initDatabase() {
       title TEXT,
       content TEXT,
       keywords TEXT,
+      file_type TEXT,
+      collection TEXT,
+      language TEXT,
+      indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE,
       FOREIGN KEY (zim_id) REFERENCES zim_libraries(id) ON DELETE CASCADE
     )
   `);
 
-  // Create FTS5 virtual table for full-text search
+  // Create FTS5 virtual table for full-text search with Porter stemming
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
       title,
       content,
       keywords,
+      file_type UNINDEXED,
+      collection UNINDEXED,
+      language UNINDEXED,
       content='search_index',
-      content_rowid='id'
+      content_rowid='id',
+      tokenize='porter'
     )
   `);
 
   // Create triggers to keep FTS index in sync
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS search_index_ai AFTER INSERT ON search_index BEGIN
-      INSERT INTO search_fts(rowid, title, content, keywords)
-      VALUES (new.id, new.title, new.content, new.keywords);
+      INSERT INTO search_fts(rowid, title, content, keywords, file_type, collection, language)
+      VALUES (new.id, new.title, new.content, new.keywords, new.file_type, new.collection, new.language);
     END;
   `);
 
@@ -432,8 +440,8 @@ export function initDatabase() {
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS search_index_au AFTER UPDATE ON search_index BEGIN
       DELETE FROM search_fts WHERE rowid = old.id;
-      INSERT INTO search_fts(rowid, title, content, keywords)
-      VALUES (new.id, new.title, new.content, new.keywords);
+      INSERT INTO search_fts(rowid, title, content, keywords, file_type, collection, language)
+      VALUES (new.id, new.title, new.content, new.keywords, new.file_type, new.collection, new.language);
     END;
   `);
 
@@ -505,6 +513,126 @@ export function initDatabase() {
   }
   try {
     db.exec(`ALTER TABLE zim_libraries ADD COLUMN error_message TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+
+  // ZIM articles table - for deep content indexing
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zim_articles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      zim_id INTEGER NOT NULL,
+      article_url TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT,
+      snippet TEXT,
+      indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (zim_id) REFERENCES zim_libraries(id) ON DELETE CASCADE,
+      UNIQUE(zim_id, article_url)
+    )
+  `);
+
+  // Create FTS5 virtual table for ZIM article full-text search
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS zim_articles_fts USING fts5(
+      title,
+      content,
+      snippet,
+      content='zim_articles',
+      content_rowid='id',
+      tokenize='porter'
+    )
+  `);
+
+  // Create triggers to keep ZIM articles FTS index in sync
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS zim_articles_ai AFTER INSERT ON zim_articles BEGIN
+      INSERT INTO zim_articles_fts(rowid, title, content, snippet)
+      VALUES (new.id, new.title, new.content, new.snippet);
+    END;
+  `);
+
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS zim_articles_ad AFTER DELETE ON zim_articles BEGIN
+      DELETE FROM zim_articles_fts WHERE rowid = old.id;
+    END;
+  `);
+
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS zim_articles_au AFTER UPDATE ON zim_articles BEGIN
+      DELETE FROM zim_articles_fts WHERE rowid = old.id;
+      INSERT INTO zim_articles_fts(rowid, title, content, snippet)
+      VALUES (new.id, new.title, new.content, new.snippet);
+    END;
+  `);
+
+  // Search history table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS search_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query TEXT NOT NULL,
+      user_id INTEGER,
+      results_count INTEGER DEFAULT 0,
+      search_type TEXT DEFAULT 'all',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Create index for popular searches
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_search_history_query ON search_history(query, created_at DESC);
+  `);
+
+  // Search cache table - for caching expensive ZIM search results
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS search_cache (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cache_key TEXT UNIQUE NOT NULL,
+      results TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL
+    )
+  `);
+
+  // Create index for cache lookups
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_search_cache_key ON search_cache(cache_key, expires_at);
+  `);
+
+  // ZIM indexing status table - track progress of article extraction
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zim_indexing_status (
+      zim_id INTEGER PRIMARY KEY,
+      status TEXT DEFAULT 'pending',
+      total_articles INTEGER DEFAULT 0,
+      indexed_articles INTEGER DEFAULT 0,
+      progress_percent REAL DEFAULT 0,
+      started_at DATETIME,
+      completed_at DATETIME,
+      error_message TEXT,
+      FOREIGN KEY (zim_id) REFERENCES zim_libraries(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Add new columns to existing tables if they don't exist
+  try {
+    db.exec(`ALTER TABLE search_index ADD COLUMN file_type TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE search_index ADD COLUMN collection TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE search_index ADD COLUMN language TEXT`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE search_index ADD COLUMN indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP`);
   } catch (err) {
     // Column already exists
   }

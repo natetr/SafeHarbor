@@ -612,6 +612,12 @@ export default function AdminZIM() {
                 Import
               </button>
               <button
+                onClick={() => navigate('/admin/zim/indexing')}
+                className="btn btn-secondary"
+              >
+                Search Indexing
+              </button>
+              <button
                 onClick={handleExport}
                 disabled={libraries.length === 0}
                 className="btn btn-secondary"

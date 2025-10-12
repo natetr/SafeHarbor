@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { decodeHtml } from '../../utils/htmlDecode';
 
@@ -11,6 +11,11 @@ export default function GuestSearch() {
   const [zimResults, setZimResults] = useState([]);
   const [availableLibraries, setAvailableLibraries] = useState([]);
   const [selectedLibraries, setSelectedLibraries] = useState(new Set());
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
+  const searchInputRef = useRef(null);
+  const suggestionsRef = useRef(null);
 
   useEffect(() => {
     const q = searchParams.get('q');
@@ -32,10 +37,45 @@ export default function GuestSearch() {
     }
   }, [searchParams.get('q')]);
 
+  // Fetch suggestions as user types
+  useEffect(() => {
+    if (query.length >= 2 && !searchParams.get('q')) {
+      const timer = setTimeout(async () => {
+        try {
+          const response = await fetch(`/api/search/suggestions?q=${encodeURIComponent(query)}&limit=8`);
+          const data = await response.json();
+          setSuggestions(data.suggestions || []);
+          setShowSuggestions(data.suggestions?.length > 0);
+        } catch (err) {
+          console.error('Failed to fetch suggestions:', err);
+        }
+      }, 300); // Debounce 300ms
+
+      return () => clearTimeout(timer);
+    } else {
+      setSuggestions([]);
+      setShowSuggestions(false);
+    }
+  }, [query]);
+
+  // Handle clicks outside suggestions dropdown
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (suggestionsRef.current && !suggestionsRef.current.contains(e.target) &&
+          searchInputRef.current && !searchInputRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const performSearch = async (searchQuery) => {
     if (!searchQuery || searchQuery.trim().length < 2) return;
 
     setLoading(true);
+    setShowSuggestions(false);
     try {
       // Search content
       const contentResponse = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
@@ -70,6 +110,30 @@ export default function GuestSearch() {
     }
   };
 
+  const handleSuggestionClick = (suggestion) => {
+    setQuery(suggestion);
+    setShowSuggestions(false);
+    navigate(`/search?q=${encodeURIComponent(suggestion)}`);
+  };
+
+  const handleKeyDown = (e) => {
+    if (!showSuggestions || suggestions.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveSuggestion(prev => (prev < suggestions.length - 1 ? prev + 1 : prev));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveSuggestion(prev => (prev > 0 ? prev - 1 : -1));
+    } else if (e.key === 'Enter' && activeSuggestion >= 0) {
+      e.preventDefault();
+      handleSuggestionClick(suggestions[activeSuggestion]);
+    } else if (e.key === 'Escape') {
+      setShowSuggestions(false);
+      setActiveSuggestion(-1);
+    }
+  };
+
   const handleOpenContent = (id) => {
     navigate(`/play/${id}`);
   };
@@ -98,6 +162,20 @@ export default function GuestSearch() {
     setSearchParams(params, { replace: true });
   };
 
+  const highlightMatch = (text, query) => {
+    if (!query || !text) return decodeHtml(text);
+
+    const decodedText = decodeHtml(text);
+    const regex = new RegExp(`(${query.split(' ').filter(Boolean).join('|')})`, 'gi');
+    const parts = decodedText.split(regex);
+
+    return parts.map((part, i) =>
+      regex.test(part) ?
+        <mark key={i} style={{ background: 'var(--warning)', color: 'var(--bg)', padding: '0 2px', borderRadius: '2px' }}>{part}</mark> :
+        part
+    );
+  };
+
   const filteredZimResults = zimResults.filter(result => {
     if (selectedLibraries.size === 0) return true;
     const category = result.zimCategory || result.zimTitle || 'Other';
@@ -115,17 +193,71 @@ export default function GuestSearch() {
         <h1 style={{ margin: 0 }}>Search Results</h1>
       </div>
 
-      {/* Search Box */}
-      <div className="search-box" style={{ marginBottom: '2rem' }}>
+      {/* Enhanced Search Box with Suggestions */}
+      <div style={{ position: 'relative', marginBottom: '2rem' }}>
         <form onSubmit={handleSearch}>
           <input
+            ref={searchInputRef}
             type="text"
             className="search-input"
-            placeholder="Search for anything..."
+            placeholder='Search for anything... Try: "medical supplies", water AND food, solar*'
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
           />
         </form>
+
+        {/* Suggestions Dropdown */}
+        {showSuggestions && suggestions.length > 0 && (
+          <div
+            ref={suggestionsRef}
+            style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              right: 0,
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: '0.5rem',
+              marginTop: '0.5rem',
+              maxHeight: '300px',
+              overflowY: 'auto',
+              zIndex: 1000,
+              boxShadow: '0 10px 25px rgba(0, 0, 0, 0.5)'
+            }}
+          >
+            {suggestions.map((suggestion, idx) => (
+              <div
+                key={idx}
+                onClick={() => handleSuggestionClick(suggestion)}
+                style={{
+                  padding: '0.75rem 1rem',
+                  cursor: 'pointer',
+                  background: activeSuggestion === idx ? 'var(--primary)' : 'transparent',
+                  color: activeSuggestion === idx ? 'white' : 'var(--text)',
+                  borderBottom: idx < suggestions.length - 1 ? '1px solid var(--border)' : 'none',
+                  transition: 'background-color 0.15s ease'
+                }}
+                onMouseEnter={() => setActiveSuggestion(idx)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" style={{ opacity: 0.6 }}>
+                    <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clipRule="evenodd" />
+                  </svg>
+                  {highlightMatch(suggestion, query)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Search Tips */}
+        {!searchParams.get('q') && (
+          <div style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+            <strong>Pro tips:</strong> Use quotes for phrases ("solar panel"), AND/OR/NOT for boolean search, * for wildcards
+          </div>
+        )}
       </div>
 
       {/* Library Filters */}
@@ -160,20 +292,29 @@ export default function GuestSearch() {
 
       {loading && (
         <div className="text-center" style={{ padding: '2rem' }}>
-          <p>Searching...</p>
+          <div style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" opacity="0.25"/>
+              <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round"/>
+            </svg>
+          </div>
+          <p style={{ marginTop: '1rem' }}>Searching...</p>
         </div>
       )}
 
       {!loading && query && totalResults === 0 && (
         <div className="card text-center" style={{ padding: '2rem' }}>
           <p className="text-muted">No results found for "{query}"</p>
+          <p className="text-muted" style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
+            Try different keywords or check your spelling
+          </p>
         </div>
       )}
 
       {!loading && totalResults > 0 && (
         <>
           <p className="text-muted mb-3">
-            Found {totalResults} result{totalResults !== 1 ? 's' : ''} for "{query}"
+            Found <strong>{totalResults}</strong> result{totalResults !== 1 ? 's' : ''} for "{query}"
           </p>
 
           {/* ZIM Article Results */}
@@ -204,10 +345,12 @@ export default function GuestSearch() {
                         {decodeHtml(result.zimTitle)}
                       </span>
                     </div>
-                    <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem', wordBreak: 'break-word' }}>{decodeHtml(result.title)}</h3>
+                    <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem', wordBreak: 'break-word' }}>
+                      {highlightMatch(result.title, query)}
+                    </h3>
                     {result.snippet && (
                       <p className="text-muted" style={{ fontSize: '0.875rem', wordBreak: 'break-word' }}>
-                        ...{decodeHtml(result.snippet)}...
+                        ...{highlightMatch(result.snippet, query)}...
                       </p>
                     )}
                   </div>
@@ -227,7 +370,7 @@ export default function GuestSearch() {
                     className="media-item"
                     onClick={() => handleOpenContent(result.id)}
                   >
-                    <div className="media-title">{result.title}</div>
+                    <div className="media-title">{highlightMatch(result.title, query)}</div>
                     <div className="media-meta">
                       <span style={{ textTransform: 'uppercase' }}>{result.fileType}</span>
                       {result.collection && <span> • {result.collection}</span>}
@@ -239,6 +382,12 @@ export default function GuestSearch() {
           )}
         </>
       )}
+
+      <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }

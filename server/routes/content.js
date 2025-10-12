@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/auth.js';
 import db from '../database/init.js';
+import { indexContent, removeContentIndex } from '../services/searchService.js';
 
 const router = express.Router();
 
@@ -122,7 +123,7 @@ router.get('/:id', optionalAuth, (req, res) => {
 });
 
 // Upload content (admin only)
-router.post('/upload', authenticateToken, requireAdmin, upload.single('file'), (req, res) => {
+router.post('/upload', authenticateToken, requireAdmin, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -159,11 +160,18 @@ router.post('/upload', authenticateToken, requireAdmin, upload.single('file'), (
       metadata || null
     );
 
-    // Add to search index
-    db.prepare(`
-      INSERT INTO search_index (content_id, title, content, keywords)
-      VALUES (?, ?, ?, ?)
-    `).run(result.lastInsertRowid, req.file.originalname, '', fileType);
+    // Index in FTS5 for powerful search
+    const contentData = {
+      id: result.lastInsertRowid,
+      title: req.file.originalname,
+      original_name: req.file.originalname,
+      file_type: fileType,
+      collection: collection || null,
+      size: req.file.size
+    };
+
+    await indexContent(contentData);
+    console.log(`✓ Indexed uploaded content: ${req.file.originalname}`);
 
     res.json({
       id: result.lastInsertRowid,
@@ -282,13 +290,17 @@ router.get('/:id/download', optionalAuth, (req, res) => {
 });
 
 // Delete content (admin only)
-router.delete('/:id', authenticateToken, requireAdmin, (req, res) => {
+router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const content = db.prepare('SELECT * FROM content WHERE id = ?').get(req.params.id);
 
     if (!content) {
       return res.status(404).json({ error: 'Content not found' });
     }
+
+    // Remove from search index
+    await removeContentIndex(content.id);
+    console.log(`✓ Removed content from search index: ${content.original_name}`);
 
     // Delete file from filesystem
     if (fs.existsSync(content.filepath)) {

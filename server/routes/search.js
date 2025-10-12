@@ -1,102 +1,145 @@
 import express from 'express';
-import { optionalAuth } from '../middleware/auth.js';
+import { optionalAuth, authenticateToken, requireAdmin } from '../middleware/auth.js';
 import db from '../database/init.js';
+import {
+  unifiedSearch,
+  searchContent,
+  getSearchSuggestions,
+  reindexAllContent,
+  getPopularSearches,
+  getRecentSearches,
+  recordSearch
+} from '../services/searchService.js';
 
 const router = express.Router();
 
-// Unified search across content and ZIM libraries
-router.get('/', optionalAuth, (req, res) => {
+// ============================================================================
+// UNIFIED SEARCH - Main search endpoint with FTS5
+// ============================================================================
+
+router.get('/', optionalAuth, async (req, res) => {
   try {
-    const { q, type, collection, limit = 50 } = req.query;
+    const { q, type, collection, fileType, language, limit = 50, offset = 0 } = req.query;
 
     if (!q || q.trim().length < 2) {
       return res.status(400).json({ error: 'Search query must be at least 2 characters' });
     }
 
     const isAdmin = req.user && req.user.role === 'admin';
-    const results = {
-      content: [],
-      zim: []
+
+    // Build search options
+    const options = {
+      collection,
+      fileType: fileType || type,
+      language,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      userId: req.user?.id,
+      hostname: req.get('host').split(':')[0]
     };
 
-    // Search content using simple LIKE query
-    let contentQuery = 'SELECT * FROM content WHERE original_name LIKE ?';
-    const params = [`%${q}%`];
+    // Determine what to search based on 'type' parameter
+    if (type === 'content') {
+      // Search only content
+      const contentResults = await searchContent(q, options);
+      return res.json({
+        query: q,
+        total: contentResults.length,
+        results: { content: contentResults, zim: [], combined: contentResults }
+      });
+    } else if (type === 'zim') {
+      // Search only ZIM (handled by ZIM route /api/zim/search)
+      return res.json({
+        query: q,
+        total: 0,
+        results: { content: [], zim: [], combined: [] },
+        message: 'Use /api/zim/search for ZIM-only searches'
+      });
+    } else {
+      // Unified search across both content and ZIM
+      const results = await unifiedSearch(q, options);
 
-    if (!isAdmin) {
-      contentQuery += ' AND hidden = 0';
+      // Record search in history
+      if (req.user) {
+        await recordSearch(q, req.user.id, results.combined.length, 'all');
+      }
+
+      return res.json({
+        query: q,
+        total: results.combined.length,
+        results: results
+      });
     }
-
-    if (collection) {
-      contentQuery += ' AND collection = ?';
-      params.push(collection);
-    }
-
-    if (type) {
-      contentQuery += ' AND file_type = ?';
-      params.push(type);
-    }
-
-    contentQuery += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(parseInt(limit));
-
-    const contentResults = db.prepare(contentQuery).all(...params);
-
-    results.content = contentResults.map(item => ({
-      id: item.id,
-      title: item.title || item.original_name,
-      type: 'content',
-      fileType: item.file_type,
-      collection: item.collection,
-      url: `/content/${item.filename}`,
-      size: item.size,
-      created_at: item.created_at
-    }));
-
-    // Search ZIM libraries (basic title/description search)
-    let zimQuery = `
-      SELECT * FROM zim_libraries
-      WHERE (title LIKE ? OR description LIKE ?)
-    `;
-
-    const zimParams = [`%${q}%`, `%${q}%`];
-
-    if (!isAdmin) {
-      zimQuery += ' AND hidden = 0';
-    }
-
-    zimQuery += ' LIMIT ?';
-    zimParams.push(parseInt(limit));
-
-    const zimResults = db.prepare(zimQuery).all(...zimParams);
-
-    results.zim = zimResults.map(item => ({
-      id: item.id,
-      title: item.title,
-      description: item.description,
-      type: 'zim',
-      language: item.language,
-      articleCount: item.article_count,
-      url: `/api/zim/${item.id}/content`,
-      size: item.size,
-      created_at: item.created_at
-    }));
-
-    // Combine and sort by relevance
-    const combined = [...results.content, ...results.zim];
-
-    res.json({
-      query: q,
-      total: combined.length,
-      results: combined
-    });
   } catch (err) {
     console.error('Search error:', err);
     res.status(500).json({ error: 'Search failed: ' + err.message });
   }
 });
 
-// Get recent additions
+// ============================================================================
+// SEARCH SUGGESTIONS - Real-time autocomplete
+// ============================================================================
+
+router.get('/suggestions', optionalAuth, async (req, res) => {
+  try {
+    const { q, limit = 10 } = req.query;
+
+    if (!q || q.length < 2) {
+      return res.json({ suggestions: [] });
+    }
+
+    const suggestions = await getSearchSuggestions(q, parseInt(limit));
+
+    res.json({ suggestions });
+  } catch (err) {
+    console.error('Suggestions error:', err);
+    res.status(500).json({ error: 'Failed to fetch suggestions' });
+  }
+});
+
+// ============================================================================
+// POPULAR SEARCHES - Trending queries
+// ============================================================================
+
+router.get('/popular', optionalAuth, async (req, res) => {
+  try {
+    const { limit = 10, days = 7 } = req.query;
+
+    const popularSearches = await getPopularSearches(parseInt(limit), parseInt(days));
+
+    res.json({ popular: popularSearches });
+  } catch (err) {
+    console.error('Popular searches error:', err);
+    res.status(500).json({ error: 'Failed to fetch popular searches' });
+  }
+});
+
+// ============================================================================
+// RECENT SEARCHES - User search history
+// ============================================================================
+
+router.get('/history', optionalAuth, async (req, res) => {
+  try {
+    const { limit = 10 } = req.query;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.json({ history: [] });
+    }
+
+    const history = await getRecentSearches(userId, parseInt(limit));
+
+    res.json({ history });
+  } catch (err) {
+    console.error('Search history error:', err);
+    res.status(500).json({ error: 'Failed to fetch search history' });
+  }
+});
+
+// ============================================================================
+// RECENT ADDITIONS - Latest content and ZIMs
+// ============================================================================
+
 router.get('/recent', optionalAuth, (req, res) => {
   try {
     const { limit = 20 } = req.query;
@@ -114,17 +157,19 @@ router.get('/recent', optionalAuth, (req, res) => {
     // Get recent ZIM libraries
     let zimQuery = 'SELECT * FROM zim_libraries';
     if (!isAdmin) {
-      zimQuery += ' WHERE hidden = 0';
+      zimQuery += ' WHERE hidden = 0 AND status = ?';
+    } else {
+      zimQuery += ' WHERE status = ?';
     }
     zimQuery += ' ORDER BY created_at DESC LIMIT ?';
 
-    const zim = db.prepare(zimQuery).all(parseInt(limit));
+    const zim = db.prepare(zimQuery).all('active', parseInt(limit));
 
     // Combine and sort
     const combined = [
       ...content.map(item => ({
         id: item.id,
-        title: item.original_name,
+        title: item.title || item.original_name,
         type: 'content',
         fileType: item.file_type,
         collection: item.collection,
@@ -151,7 +196,10 @@ router.get('/recent', optionalAuth, (req, res) => {
   }
 });
 
-// Get featured/popular content
+// ============================================================================
+// FEATURED/POPULAR CONTENT - Grouped by collection
+// ============================================================================
+
 router.get('/featured', optionalAuth, (req, res) => {
   try {
     const isAdmin = req.user && req.user.role === 'admin';
@@ -184,7 +232,7 @@ router.get('/featured', optionalAuth, (req, res) => {
       }
       grouped[collection].items.push({
         id: item.id,
-        title: item.original_name,
+        title: item.title || item.original_name,
         type: 'content',
         fileType: item.file_type,
         url: `/content/${item.filename}`,
@@ -199,29 +247,82 @@ router.get('/featured', optionalAuth, (req, res) => {
   }
 });
 
-// Rebuild search index
-router.post('/reindex', optionalAuth, (req, res) => {
+// ============================================================================
+// REINDEX - Rebuild search index (Admin only)
+// ============================================================================
+
+router.post('/reindex', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Clear existing index
-    db.prepare('DELETE FROM search_index').run();
+    console.log('Starting full content reindex...');
 
-    // Rebuild from content
-    const content = db.prepare('SELECT * FROM content').all();
-
-    content.forEach(item => {
-      db.prepare(`
-        INSERT INTO search_index (content_id, title, content, keywords)
-        VALUES (?, ?, ?, ?)
-      `).run(item.id, item.original_name, '', item.file_type);
-    });
+    const result = await reindexAllContent();
 
     res.json({
       message: 'Search index rebuilt successfully',
-      indexed: content.length
+      indexed: result.indexed,
+      total: result.total
     });
   } catch (err) {
     console.error('Reindex error:', err);
-    res.status(500).json({ error: 'Failed to rebuild search index' });
+    res.status(500).json({ error: 'Failed to rebuild search index: ' + err.message });
+  }
+});
+
+// ============================================================================
+// SEARCH STATS - Admin analytics
+// ============================================================================
+
+router.get('/stats', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    // Get search statistics
+    const stats = {
+      totalSearches: db.prepare('SELECT COUNT(*) as count FROM search_history').get().count,
+      uniqueQueries: db.prepare('SELECT COUNT(DISTINCT query) as count FROM search_history').get().count,
+      indexedContent: db.prepare('SELECT COUNT(*) as count FROM search_index').get().count,
+      indexedZIMArticles: db.prepare('SELECT COUNT(*) as count FROM zim_articles').get().count,
+      cacheSize: db.prepare('SELECT COUNT(*) as count FROM search_cache').get().count,
+      topSearches: await getPopularSearches(10, 30), // Top 10 from last 30 days
+      searchesByDay: db.prepare(`
+        SELECT DATE(created_at) as date, COUNT(*) as count
+        FROM search_history
+        WHERE created_at >= date('now', '-30 days')
+        GROUP BY DATE(created_at)
+        ORDER BY date DESC
+      `).all()
+    };
+
+    res.json(stats);
+  } catch (err) {
+    console.error('Search stats error:', err);
+    res.status(500).json({ error: 'Failed to fetch search statistics' });
+  }
+});
+
+// ============================================================================
+// CLEAR SEARCH HISTORY - User or admin
+// ============================================================================
+
+router.delete('/history', optionalAuth, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const isAdmin = req.user?.role === 'admin';
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (isAdmin && req.query.all === 'true') {
+      // Admin can clear all history
+      db.prepare('DELETE FROM search_history').run();
+      return res.json({ message: 'All search history cleared' });
+    } else {
+      // User can clear their own history
+      db.prepare('DELETE FROM search_history WHERE user_id = ?').run(userId);
+      return res.json({ message: 'Your search history cleared' });
+    }
+  } catch (err) {
+    console.error('Clear history error:', err);
+    res.status(500).json({ error: 'Failed to clear search history' });
   }
 });
 
