@@ -1233,6 +1233,10 @@ router.get('/search', async (req, res) => {
     startOperation(operationId, 'search', { query: q, zimId, limit });
     zimLogger.search.info(`Searching ZIM content`, { query: q, zimId: zimId || 'all', limit });
 
+    // Get hostname from request to build full kiwix URLs
+    const hostname = req.get('host').split(':')[0]; // Remove port if present
+    const kiwixBaseUrl = `http://${hostname}:${KIWIX_PORT}`;
+
     const results = [];
 
     // Get ZIM libraries to search
@@ -1307,7 +1311,7 @@ router.get('/search', async (req, res) => {
               zimTitle: zim.title,
               title,
               snippet,
-              url: `http://localhost:${KIWIX_PORT}/${articlePath}`, // Direct link to kiwix article
+              url: `${kiwixBaseUrl}/${articlePath}`, // Direct link to kiwix article using request hostname
               type: 'zim-article'
             });
           }
