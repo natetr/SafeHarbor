@@ -22,8 +22,24 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    checkDatabaseHealth();
     checkAuth();
   }, []);
+
+  const checkDatabaseHealth = async () => {
+    try {
+      const response = await fetch('/api/health');
+      const health = await response.json();
+
+      if (health.database === 'reconnected') {
+        console.log('✓ Database reconnected successfully');
+      } else if (health.database === 'error') {
+        console.warn('⚠️ Database health check failed, but reconnection may have been attempted');
+      }
+    } catch (err) {
+      console.error('Health check failed:', err);
+    }
+  };
 
   const checkAuth = async () => {
     const token = localStorage.getItem('token');
