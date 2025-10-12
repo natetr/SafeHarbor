@@ -25,6 +25,10 @@ export default function GuestSearch() {
       }
 
       performSearch(q);
+      // Update page title with search term
+      document.title = `SafeHarbor - Search Results: "${q}"`;
+    } else {
+      document.title = 'SafeHarbor - Search';
     }
   }, [searchParams.get('q')]);
 
