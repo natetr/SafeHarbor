@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { decodeHtml } from '../../utils/htmlDecode';
 
 export default function GuestHome() {
   const [featured, setFeatured] = useState([]);
@@ -64,7 +65,7 @@ export default function GuestHome() {
         <div className="grid grid-3">
           {recent.map(item => (
             <Link key={item.id} to={`/player/${item.id}`} className="media-item">
-              <div className="media-title">{item.title}</div>
+              <div className="media-title">{decodeHtml(item.title)}</div>
               <div className="media-meta">
                 {item.fileType || item.type} • {formatSize(item.size)}
               </div>
@@ -80,12 +81,12 @@ export default function GuestHome() {
             <div key={collection.name} className="card">
               <div className="card-header">{collection.name}</div>
               {collection.description && (
-                <p className="text-muted mb-2">{collection.description}</p>
+                <p className="text-muted mb-2">{decodeHtml(collection.description)}</p>
               )}
               <div className="grid grid-4">
                 {collection.items.slice(0, 4).map(item => (
                   <Link key={item.id} to={`/player/${item.id}`} className="media-item">
-                    <div className="media-title">{item.title}</div>
+                    <div className="media-title">{decodeHtml(item.title)}</div>
                     <div className="media-meta">{item.fileType}</div>
                   </Link>
                 ))}
