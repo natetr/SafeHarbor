@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { decodeHtml } from '../utils/htmlDecode';
 
 let showSnackbar = null;
 
@@ -60,7 +61,7 @@ export default function Snackbar() {
         fontWeight: '500'
       }}
     >
-      {message}
+      {decodeHtml(message)}
       <style>{`
         @keyframes slideUp {
           from {

@@ -197,13 +197,13 @@ export default function GuestSearch() {
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap'
                       }}>
-                        {result.zimTitle}
+                        {decodeHtml(result.zimTitle)}
                       </span>
                     </div>
                     <h3 style={{ fontSize: '1.1rem', marginBottom: '0.5rem', wordBreak: 'break-word' }}>{decodeHtml(result.title)}</h3>
                     {result.snippet && (
                       <p className="text-muted" style={{ fontSize: '0.875rem', wordBreak: 'break-word' }}>
-                        ...{result.snippet}...
+                        ...{decodeHtml(result.snippet)}...
                       </p>
                     )}
                   </div>
