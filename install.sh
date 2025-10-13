@@ -32,7 +32,8 @@ apt-get install -y \
   curl \
   wireless-tools \
   wpasupplicant \
-  iptables
+  iptables \
+  lsof
 
 # Install kiwix-tools with libzim 9.2.0+ (fixes macOS/large file mmap issues)
 echo "Installing kiwix-tools..."
@@ -205,7 +206,7 @@ PrivateTmp=true
 # Protect system directories
 ProtectSystem=strict
 # Allow writing to these directories
-ReadWritePaths=/opt/safeharbor /tmp
+ReadWritePaths=/opt/safeharbor /var/safeharbor /var/log/safeharbor /tmp
 
 # Protect home directory
 ProtectHome=read-only
