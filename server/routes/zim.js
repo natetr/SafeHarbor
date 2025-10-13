@@ -8,6 +8,7 @@ import { spawn, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import si from 'systeminformation';
 import { zimLogger, startOperation, endOperation } from '../utils/zimLogger.js';
+import { resumeAllPausedJobs } from '../services/zimIndexingService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,6 +28,7 @@ let restartTimer = null; // Timer for debounced restart
 let serverBootTime = Date.now(); // Track when the server started
 let zimCrashHistory = new Map(); // Track crash history: zimId -> { count, lastCrash }
 let gracePeriodCrashes = []; // Track crashes during grace period to detect repeated failures
+let mmapExceptionDetected = false; // Track if MMapException was detected in stderr
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -221,6 +223,9 @@ async function killExistingKiwixProcesses() {
 
 // Start Kiwix server
 async function startKiwixServer() {
+  // Reset crash detection flags for this launch
+  mmapExceptionDetected = false;
+
   // First, kill any orphaned kiwix-serve processes from previous runs
   // CRITICAL: Must await this to ensure port is free before starting
   const portIsReady = await killExistingKiwixProcesses();
@@ -274,14 +279,113 @@ async function startKiwixServer() {
   try {
     zimLogger.kiwix.detail('Spawning Kiwix process', { command: kiwixPath, args });
     kiwixProcess = spawn(kiwixPath, args, {
-      stdio: 'inherit'
+      stdio: ['inherit', 'inherit', 'pipe'] // Capture stderr for crash detection
     });
 
     kiwixStartTime = Date.now();
     zimLogger.kiwix.success('Kiwix server process spawned successfully', { pid: kiwixProcess.pid, port: KIWIX_PORT });
 
-    kiwixProcess.on('error', (err) => {
+    // Monitor stderr for fatal errors like MMapException
+    let stderrBuffer = '';
+    kiwixProcess.stderr.on('data', (data) => {
+      const message = data.toString();
+      stderrBuffer += message;
+
+      // Log stderr output (excluding normal verbose output)
+      if (!message.includes('verbose:') && message.trim()) {
+        zimLogger.kiwix.warn('Kiwix stderr output', { message: message.trim() });
+      }
+
+      // Detect MMapException - this is a fatal error that requires immediate quarantine
+      if (message.includes('MMapException')) {
+        mmapExceptionDetected = true; // Set flag for exit handler
+        zimLogger.kiwix.error('FATAL: MMapException detected in kiwix-serve!', {
+          message: message.trim(),
+          note: 'This indicates a corrupted or incompatible ZIM file'
+        });
+
+        // Immediately quarantine the most recently added ZIM
+        // MMapException happens during ZIM loading, so the culprit is almost certainly the newest ZIM
+        (async () => {
+          try {
+            let zimToQuarantine = null;
+
+            // Strategy 1: Use lastAddedZimId if available (most reliable)
+            if (lastAddedZimId) {
+              zimLogger.kiwix.detail('Checking recently added ZIM for MMapException', { lastAddedZimId });
+              const recentZim = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [lastAddedZimId]);
+              if (recentZim && recentZim.status === 'active') {
+                zimToQuarantine = recentZim;
+                zimLogger.kiwix.warn('MMapException culprit identified: Recently added ZIM', {
+                  zimId: zimToQuarantine.id,
+                  title: zimToQuarantine.title,
+                  filename: zimToQuarantine.filename
+                });
+              }
+            }
+
+            // Strategy 2: Fallback to newest active ZIM
+            if (!zimToQuarantine) {
+              zimLogger.kiwix.detail('No recently added ZIM tracked - checking newest active ZIM');
+              const newestZim = await safeDbGet("SELECT * FROM zim_libraries WHERE status = 'active' ORDER BY created_at DESC LIMIT 1", []);
+              if (newestZim) {
+                zimToQuarantine = newestZim;
+                zimLogger.kiwix.warn('MMapException culprit identified: Newest active ZIM', {
+                  zimId: zimToQuarantine.id,
+                  title: zimToQuarantine.title,
+                  filename: zimToQuarantine.filename
+                });
+              }
+            }
+
+            if (zimToQuarantine) {
+              zimLogger.kiwix.warn(`🔒 QUARANTINING ZIM due to MMapException: ${zimToQuarantine.title || zimToQuarantine.filename}`);
+
+              // Immediately quarantine without waiting for multiple crashes
+              // MMapException is a definitive signal of incompatibility
+              await safeDbRun(
+                "UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?",
+                [`MMapException - kiwix-serve cannot load this ZIM file (corrupted or incompatible format)`, zimToQuarantine.id]
+              );
+
+              // Log the quarantine
+              await zimLogger.kiwix.logQuarantine({
+                zimTitle: zimToQuarantine.title,
+                zimFilename: zimToQuarantine.filename,
+                zimId: zimToQuarantine.id,
+                details: 'Automatically quarantined due to MMapException during kiwix-serve startup',
+                errorMessage: 'MMapException: ZIM file corrupted or incompatible',
+                crashPattern: 'MMapException'
+              });
+
+              // Clear the crash tracking
+              zimCrashHistory.delete(zimToQuarantine.id);
+              lastAddedZimId = null;
+
+              zimLogger.kiwix.success(`✓ ZIM quarantined: ${zimToQuarantine.title || zimToQuarantine.filename}`);
+              console.log('🔄 Kiwix will restart without the problematic ZIM after it exits...');
+            } else {
+              zimLogger.kiwix.error('Could not identify ZIM to quarantine for MMapException', {
+                note: 'No active ZIMs found or lastAddedZimId not tracked'
+              });
+            }
+          } catch (err) {
+            zimLogger.kiwix.error('Error quarantining ZIM for MMapException', {
+              error: err.message,
+              stack: err.stack
+            });
+          }
+        })();
+      }
+    });
+
+    kiwixProcess.on('error', async (err) => {
       zimLogger.kiwix.error('Kiwix server process error', { error: err.message, code: err.code });
+      // Log to database
+      await zimLogger.kiwix.logStartFailure({
+        details: `Kiwix process error: ${err.message}`,
+        errorMessage: err.message
+      });
       kiwixProcess = null;
       kiwixStartTime = null;
     });
@@ -342,15 +446,25 @@ async function startKiwixServer() {
       // Increased thresholds to account for slower ZIM validation:
       // - Non-zero exit within 15 seconds (increased from 5s)
       // - Code 0 exit within 10 seconds AND not intentional restart (increased from 2s)
-      const isActualCrash = (code !== 0 && code !== null && uptime < 15) ||
+      // - MMapException is always considered a crash regardless of timing
+      const isActualCrash = mmapExceptionDetected ||
+                            (code !== 0 && code !== null && uptime < 15) ||
                             (code === 0 && uptime < 10 && !isRestarting);
 
       if (isActualCrash) {
-        zimLogger.kiwix.error('Kiwix crashed! Attempting recovery...', {
+        const crashDetails = {
           exitCode: code,
           uptime: `${uptime}s`,
           intentionalRestart: isRestarting,
-          crashType: code !== 0 ? 'non-zero-exit' : 'premature-exit'
+          crashType: mmapExceptionDetected ? 'MMapException' : (code !== 0 ? 'non-zero-exit' : 'premature-exit')
+        };
+        zimLogger.kiwix.error('Kiwix crashed! Attempting recovery...', crashDetails);
+
+        // Log crash to database
+        await zimLogger.kiwix.logCrash({
+          details: `Kiwix crashed after ${uptime}s uptime`,
+          errorMessage: `Exit code ${code}, crash type: ${crashDetails.crashType}`,
+          ...crashDetails
         });
 
         // CRITICAL: Check if this was a port conflict - DON'T blame ZIMs if it was
@@ -418,22 +532,35 @@ async function startKiwixServer() {
               lastCrash: new Date(crashRecord.lastCrash).toISOString()
             });
 
-            // Only quarantine if this ZIM has crashed 2+ times
-            // This prevents false positives from temporary issues
-            if (crashRecord.count >= 2) {
-              zimLogger.kiwix.warn(`Quarantining problematic ZIM after ${crashRecord.count} crashes: ${zimToQuarantine.title || zimToQuarantine.filename}`);
+            // MMapException = immediate quarantine (definitive signal of incompatibility)
+            // Other crashes = quarantine after 2+ occurrences (prevents false positives)
+            const shouldQuarantine = mmapExceptionDetected || crashRecord.count >= 2;
+
+            if (shouldQuarantine) {
+              const reason = mmapExceptionDetected
+                ? `MMapException - kiwix-serve cannot load this ZIM file (corrupted or incompatible format)`
+                : `Kiwix crashed ${crashRecord.count} times when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`;
+
+              zimLogger.kiwix.warn(`Quarantining problematic ZIM${mmapExceptionDetected ? ' (MMapException detected)' : ` after ${crashRecord.count} crashes`}: ${zimToQuarantine.title || zimToQuarantine.filename}`);
 
               // Quarantine the ZIM - CRITICAL: Use queued database write
               await safeDbRun("UPDATE zim_libraries SET status = 'quarantined', error_message = ? WHERE id = ?",
-                [`Kiwix crashed ${crashRecord.count} times when loading this ZIM (exit code: ${code}, uptime: ${uptime}s)`, zimToQuarantine.id]);
+                [reason, zimToQuarantine.id]);
 
-              // Log the quarantine - wait for completion
-              await logZimActivity('zim_quarantined', {
+              // Log the quarantine to database with enhanced details
+              await zimLogger.kiwix.logQuarantine({
                 zimTitle: zimToQuarantine.title,
                 zimFilename: zimToQuarantine.filename,
                 zimId: zimToQuarantine.id,
-                details: `Automatically quarantined after ${crashRecord.count} crashes (code: ${code}, uptime: ${uptime}s)`,
-                status: 'success'
+                details: mmapExceptionDetected
+                  ? 'Automatically quarantined due to MMapException during kiwix-serve startup'
+                  : `Automatically quarantined after ${crashRecord.count} crashes (exit code: ${code}, uptime: ${uptime}s)`,
+                errorMessage: mmapExceptionDetected
+                  ? 'MMapException: ZIM file corrupted or incompatible'
+                  : `ZIM caused ${crashRecord.count} kiwix-serve crashes`,
+                exitCode: code,
+                crashCount: crashRecord.count,
+                crashPattern: mmapExceptionDetected ? 'MMapException' : undefined
               });
 
               // Clear crash history for this ZIM after quarantine
@@ -463,6 +590,7 @@ async function startKiwixServer() {
       isRestarting = false;
       kiwixProcess = null;
       kiwixStartTime = null;
+      mmapExceptionDetected = false; // Reset flag for next launch
     });
 
     // Successfully started - clear restart flag after a moment
@@ -471,6 +599,18 @@ async function startKiwixServer() {
     }, 3000);
 
     console.log(`Kiwix server started on port ${KIWIX_PORT}`);
+
+    // Resume any paused indexing jobs after a brief delay to let kiwix stabilize
+    setTimeout(async () => {
+      try {
+        const result = await resumeAllPausedJobs();
+        if (result.count > 0) {
+          console.log(`✅ Resumed ${result.count} paused indexing job(s) after Kiwix restart`);
+        }
+      } catch (err) {
+        console.error('Error resuming paused indexing jobs:', err);
+      }
+    }, 5000); // Wait 5 seconds for kiwix to stabilize
   } catch (err) {
     console.error('Failed to start Kiwix server:', err);
     kiwixStartTime = null;

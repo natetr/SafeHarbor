@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import db from '../database/init.js';
 import { logError } from '../utils/crashReporter.js';
+import { zimLogger } from '../utils/zimLogger.js';
 
 // Health check thresholds
 const THRESHOLDS = {
@@ -76,11 +77,19 @@ async function performHealthCheck(restartKiwixCallback) {
     const percentUsed = (usedMem / totalMem) * 100;
 
     if (percentUsed > THRESHOLDS.MEMORY_PERCENT) {
-      issues.push({
+      const issue = {
         type: 'memory',
         severity: 'warning',
         message: `High memory usage: ${percentUsed.toFixed(1)}%`,
         value: { percentUsed, usedMem, totalMem }
+      };
+      issues.push(issue);
+
+      // Log to database
+      await zimLogger.health.logIssue({
+        issueType: 'memory',
+        details: `Memory usage: ${percentUsed.toFixed(1)}% (${Math.round(usedMem / 1024 / 1024)}MB / ${Math.round(totalMem / 1024 / 1024)}MB)`,
+        errorMessage: issue.message
       });
 
       // Attempt recovery: force garbage collection if available
@@ -88,6 +97,11 @@ async function performHealthCheck(restartKiwixCallback) {
         console.log('🧹 Attempting garbage collection...');
         global.gc();
         recoveryAttempted = true;
+
+        await zimLogger.health.logRecovery({
+          action: 'garbage_collection',
+          details: 'Forced garbage collection due to high memory usage'
+        });
       }
     }
   } catch (err) {
@@ -106,11 +120,19 @@ async function performHealthCheck(restartKiwixCallback) {
     const freeMB = (stats.bavail * stats.bsize) / (1024 * 1024);
 
     if (freeMB < THRESHOLDS.DISK_SPACE_MB) {
-      issues.push({
+      const issue = {
         type: 'disk',
         severity: 'critical',
         message: `Low disk space: ${freeMB.toFixed(0)}MB free`,
         value: { freeMB }
+      };
+      issues.push(issue);
+
+      // Log critical disk space issue to database
+      await zimLogger.health.logCritical({
+        issueType: 'disk_space',
+        details: `Only ${freeMB.toFixed(0)}MB free (threshold: ${THRESHOLDS.DISK_SPACE_MB}MB)`,
+        errorMessage: issue.message
       });
     }
   } catch (err) {
@@ -136,11 +158,19 @@ async function performHealthCheck(restartKiwixCallback) {
       throw new Error('Database returned unexpected result');
     }
   } catch (err) {
-    issues.push({
+    const issue = {
       type: 'database',
       severity: 'critical',
       message: 'Database connectivity issue',
       error: err.message
+    };
+    issues.push(issue);
+
+    // Log critical database issue
+    await zimLogger.health.logCritical({
+      issueType: 'database',
+      details: 'Database connectivity lost or query failed',
+      errorMessage: err.message
     });
   }
 
@@ -156,11 +186,19 @@ async function performHealthCheck(restartKiwixCallback) {
     const duration = Date.now() - start;
 
     if (output === 'none' || output === '') {
-      issues.push({
+      const issue = {
         type: 'kiwix',
         severity: 'critical',
         message: 'Kiwix-serve not running',
         value: { port: KIWIX_PORT }
+      };
+      issues.push(issue);
+
+      // Log critical kiwix issue
+      await zimLogger.health.logCritical({
+        issueType: 'kiwix_down',
+        details: `Kiwix-serve process not found on port ${KIWIX_PORT}`,
+        errorMessage: issue.message
       });
 
       // Attempt recovery: restart kiwix-serve
@@ -169,6 +207,12 @@ async function performHealthCheck(restartKiwixCallback) {
         try {
           restartKiwixCallback();
           recoveryAttempted = true;
+
+          // Log recovery attempt
+          await zimLogger.health.logRecovery({
+            action: 'restart_kiwix',
+            details: 'Automatically restarting kiwix-serve after process down detection'
+          });
         } catch (err) {
           console.error('Failed to restart kiwix-serve:', err.message);
         }
@@ -214,9 +258,48 @@ async function performHealthCheck(restartKiwixCallback) {
   if (consecutiveFailures >= THRESHOLDS.MAX_CONSECUTIVE_FAILURES) {
     console.error('\n═══════════════════════════════════════════════');
     console.error(`❌ CRITICAL: ${consecutiveFailures} consecutive health check failures`);
+    console.error('   🔄 Recovery actions attempted');
     console.error('   Application is in degraded state');
     console.error('   Exiting to trigger systemd restart...');
     console.error('═══════════════════════════════════════════════\n');
+
+    // Before exiting, attempt final cleanup of stuck indexing jobs
+    try {
+      console.log('🧹 Attempting final cleanup of stuck indexing jobs...');
+      const stuckJobs = db.prepare(`
+        SELECT zim_id, zim_libraries.title, zim_libraries.filename
+        FROM zim_indexing_status
+        LEFT JOIN zim_libraries ON zim_indexing_status.zim_id = zim_libraries.id
+        WHERE status = 'indexing'
+      `).all();
+
+      if (stuckJobs.length > 0) {
+        console.log(`   Found ${stuckJobs.length} stuck indexing job(s):`);
+        stuckJobs.forEach(job => {
+          console.log(`   - ZIM ID ${job.zim_id}: ${job.title || job.filename}`);
+        });
+
+        // Reset stuck jobs to 'failed' state
+        db.prepare(`
+          UPDATE zim_indexing_status
+          SET status = 'failed',
+              error_message = 'Indexing interrupted by application crash/restart'
+          WHERE status = 'indexing'
+        `).run();
+
+        console.log('   ✓ Reset stuck indexing jobs to failed state');
+
+        // Log cleanup to database
+        await zimLogger.health.logRecovery({
+          action: 'cleanup_stuck_indexing',
+          details: `Reset ${stuckJobs.length} stuck indexing job(s) before exit`
+        });
+      } else {
+        console.log('   ✓ No stuck indexing jobs found');
+      }
+    } catch (cleanupErr) {
+      console.error('   ✗ Failed to cleanup stuck indexing jobs:', cleanupErr.message);
+    }
 
     logError(
       new Error(`Health check failed ${consecutiveFailures} times consecutively`),

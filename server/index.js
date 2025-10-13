@@ -59,6 +59,39 @@ const { startHealthMonitor, stopHealthMonitor } = await import('./services/healt
 // Initialize database
 initDatabase();
 
+// Cleanup any stuck indexing jobs from previous crashes
+console.log('🧹 Checking for stuck indexing jobs from previous crashes...');
+try {
+  const db = (await import('./database/init.js')).default;
+  const stuckJobs = db.prepare(`
+    SELECT zim_indexing_status.zim_id, zim_libraries.title, zim_libraries.filename
+    FROM zim_indexing_status
+    LEFT JOIN zim_libraries ON zim_indexing_status.zim_id = zim_libraries.id
+    WHERE zim_indexing_status.status = 'indexing'
+  `).all();
+
+  if (stuckJobs.length > 0) {
+    console.log(`   Found ${stuckJobs.length} stuck indexing job(s) from previous run:`);
+    stuckJobs.forEach(job => {
+      console.log(`   - ZIM ID ${job.zim_id}: ${job.title || job.filename}`);
+    });
+
+    // Reset stuck jobs to 'failed' state
+    db.prepare(`
+      UPDATE zim_indexing_status
+      SET status = 'failed',
+          error_message = 'Indexing interrupted by application crash/restart'
+      WHERE status = 'indexing'
+    `).run();
+
+    console.log('   ✓ Reset stuck indexing jobs to failed state');
+  } else {
+    console.log('   ✓ No stuck indexing jobs found');
+  }
+} catch (err) {
+  console.error('   ✗ Failed to cleanup stuck indexing jobs:', err.message);
+}
+
 // Start Kiwix server after database is ready
 setTimeout(() => {
   startKiwixServer();

@@ -2,6 +2,7 @@ import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
 import { Archive } from '@openzim/libzim';
 import path from 'path';
+import { zimLogger } from '../utils/zimLogger.js';
 
 const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 
@@ -12,6 +13,86 @@ const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 
 // Track indexing jobs
 const activeJobs = new Map(); // zimId -> jobInfo
+
+// Circuit breaker for kiwix-serve health
+const circuitBreaker = {
+  failureCount: 0,
+  lastFailure: null,
+  isOpen: false,
+  threshold: 5, // Open circuit after 5 consecutive failures
+  resetTimeout: 30000, // Try to close circuit after 30 seconds
+  halfOpenAttempts: 0
+};
+
+/**
+ * Check if kiwix-serve is healthy and responding
+ */
+async function checkKiwixHealth() {
+  try {
+    const healthUrl = `http://localhost:${KIWIX_PORT}/catalog/v2/entries`;
+    const response = await axios.get(healthUrl, {
+      timeout: 3000,
+      validateStatus: (status) => status < 500 // Accept 2xx, 3xx, 4xx
+    });
+    return true;
+  } catch (err) {
+    if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET') {
+      return false; // Kiwix is down
+    }
+    // Other errors (like network issues) - assume kiwix might be up
+    return true;
+  }
+}
+
+/**
+ * Record a failure in the circuit breaker
+ */
+function recordFailure() {
+  circuitBreaker.failureCount++;
+  circuitBreaker.lastFailure = Date.now();
+
+  if (circuitBreaker.failureCount >= circuitBreaker.threshold && !circuitBreaker.isOpen) {
+    circuitBreaker.isOpen = true;
+    console.warn(`⚠️  Circuit breaker OPENED - Kiwix appears to be down (${circuitBreaker.failureCount} failures)`);
+    zimLogger.indexing.warn('Circuit breaker opened - pausing indexing requests', {
+      failureCount: circuitBreaker.failureCount,
+      threshold: circuitBreaker.threshold
+    });
+  }
+}
+
+/**
+ * Record a success in the circuit breaker
+ */
+function recordSuccess() {
+  if (circuitBreaker.failureCount > 0 || circuitBreaker.isOpen) {
+    console.log(`✓ Circuit breaker reset - Kiwix is responding again`);
+    zimLogger.indexing.info('Circuit breaker closed - resuming normal operation');
+  }
+  circuitBreaker.failureCount = 0;
+  circuitBreaker.isOpen = false;
+  circuitBreaker.halfOpenAttempts = 0;
+}
+
+/**
+ * Check if circuit breaker allows requests
+ */
+function canMakeRequest() {
+  if (!circuitBreaker.isOpen) {
+    return true;
+  }
+
+  // If circuit is open, check if we should try to close it (half-open state)
+  const timeSinceLastFailure = Date.now() - circuitBreaker.lastFailure;
+  if (timeSinceLastFailure >= circuitBreaker.resetTimeout) {
+    // Try one request in half-open state
+    zimLogger.indexing.detail('Circuit breaker entering half-open state - testing connection');
+    circuitBreaker.halfOpenAttempts++;
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * Start indexing a ZIM file
@@ -26,6 +107,8 @@ export async function startZIMIndexing(zimId, options = {}) {
       batchSize = 50, // Process in batches
       hostname = 'localhost'
     } = options;
+
+    console.log(`[ZIM Indexing] Starting with maxArticles: ${maxArticles} (0 = unlimited)`);
 
     // Check if already indexing
     if (activeJobs.has(zimId)) {
@@ -55,7 +138,12 @@ export async function startZIMIndexing(zimId, options = {}) {
       startTime: Date.now(),
       indexed: 0,
       total: 0,
-      errors: 0
+      errors: 0,
+      cancelled: false, // Add cancellation flag
+      paused: false, // Add paused flag for crash recovery
+      pauseReason: null, // Track why indexing was paused
+      errorSamples: [], // Store sample of error messages
+      errorTypes: {} // Track error types and counts
     };
 
     activeJobs.set(zimId, jobInfo);
@@ -73,6 +161,15 @@ export async function startZIMIndexing(zimId, options = {}) {
           SET status = 'completed', completed_at = CURRENT_TIMESTAMP, memory_usage_bytes = ?
           WHERE zim_id = ?
         `, [memoryUsage, zimId]);
+
+        // Log completion to database
+        await zimLogger.indexing.logComplete({
+          zimTitle: zim.title,
+          zimFilename: zim.filename,
+          zimId: zimId,
+          details: `Indexed ${jobInfo.indexed} articles, memory usage: ${Math.round(memoryUsage / 1024 / 1024)}MB`
+        });
+
         activeJobs.delete(zimId);
       })
       .catch(async (err) => {
@@ -82,6 +179,16 @@ export async function startZIMIndexing(zimId, options = {}) {
           SET status = 'failed', error_message = ?
           WHERE zim_id = ?
         `, [err.message, zimId]);
+
+        // Log failure to database
+        await zimLogger.indexing.logFailed({
+          zimTitle: zim.title,
+          zimFilename: zim.filename,
+          zimId: zimId,
+          details: `Indexing failed after processing ${jobInfo.indexed} articles`,
+          errorMessage: err.message
+        });
+
         activeJobs.delete(zimId);
       });
 
@@ -129,18 +236,33 @@ async function discoverArticlesViaLibzim(zimPath, maxArticles) {
         continue; // Skip redirects - we want actual content to avoid duplicates
       }
 
+      // Filter out non-content files (assets, build artifacts, etc.)
+      const path = entry.path.toLowerCase();
+      const skipExtensions = [
+        '.map', '.css', '.js', '.json', '.xml',
+        '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp',
+        '.woff', '.woff2', '.ttf', '.eot', '.otf',
+        '.mp3', '.mp4', '.ogg', '.webm', '.wav',
+        '.zip', '.gz', '.tar', '.pdf'
+      ];
+
+      if (skipExtensions.some(ext => path.endsWith(ext))) {
+        otherCount++;
+        continue; // Skip asset files
+      }
+
       // Store the article path
       articles.push(entry.path);
       articleCount++;
 
       // Log progress every 1000 articles
       if (articleCount % 1000 === 0) {
-        console.log(`  Progress: ${articleCount.toLocaleString()} articles, ${redirectCount.toLocaleString()} redirects discovered...`);
+        zimLogger.indexing.verbose(`Progress: ${articleCount.toLocaleString()} articles, ${redirectCount.toLocaleString()} redirects discovered...`);
       }
 
       // Respect maxArticles limit
       if (maxArticles > 0 && articleCount >= maxArticles) {
-        console.log(`  Reached maxArticles limit of ${maxArticles}`);
+        console.log(`  ✓ Reached maxArticles limit of ${maxArticles}, stopping discovery`);
         break;
       }
     }
@@ -254,10 +376,29 @@ async function indexZIMArticles(zim, options) {
       console.warn(`Direct ZIM access failed: ${libzimError.message}`);
       console.log(`Falling back to search-based discovery...`);
 
-      const discoveredArticles = await discoverArticlesViaSearch(zimName, maxArticles);
-      articlesToIndex = Array.from(discoveredArticles).slice(0, maxArticles);
+      // Log discovery method failure (but not a complete failure yet)
+      zimLogger.indexing.warn('Direct ZIM access failed, using fallback method', {
+        zimTitle: zim.title,
+        error: libzimError.message,
+        fallbackMethod: 'search-based discovery'
+      });
 
-      console.log(`✓ Using search-based fallback: discovered ${articlesToIndex.length} articles`);
+      try {
+        const discoveredArticles = await discoverArticlesViaSearch(zimName, maxArticles);
+        articlesToIndex = Array.from(discoveredArticles).slice(0, maxArticles);
+
+        console.log(`✓ Using search-based fallback: discovered ${articlesToIndex.length} articles`);
+      } catch (fallbackError) {
+        // Both methods failed - log critical error
+        await zimLogger.indexing.logDiscoveryFailed({
+          zimTitle: zim.title,
+          zimFilename: zim.filename,
+          zimId: zim.id,
+          details: `Both direct access and search-based discovery failed`,
+          errorMessage: `Direct: ${libzimError.message}, Fallback: ${fallbackError.message}`
+        });
+        throw new Error(`All discovery methods failed: ${fallbackError.message}`);
+      }
     }
     jobInfo.total = articlesToIndex.length;
 
@@ -289,12 +430,81 @@ async function indexZIMArticles(zim, options) {
 
     // Step 4: Fetch and index articles in batches
     for (let i = 0; i < articlesToIndex.length; i += batchSize) {
+      // Check for cancellation
+      if (jobInfo.cancelled) {
+        console.log(`Indexing cancelled for ${zim.title} at ${jobInfo.indexed}/${jobInfo.total} articles`);
+        throw new Error('Indexing cancelled by user');
+      }
+
+      // Check if paused and wait
+      while (jobInfo.paused) {
+        console.log(`⏸️  Indexing paused for ${zim.title} - waiting for resume...`);
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Check again in 5 seconds
+
+        // Check for cancellation while paused
+        if (jobInfo.cancelled) {
+          console.log(`Indexing cancelled while paused for ${zim.title}`);
+          throw new Error('Indexing cancelled by user');
+        }
+      }
+
+      // Health check before each batch (every N articles)
+      if (i % (batchSize * 5) === 0) { // Check every 5 batches
+        if (!canMakeRequest()) {
+          // Circuit breaker is open - pause indexing
+          console.warn(`⚠️  Kiwix appears to be down - pausing indexing for ${zim.title}`);
+          jobInfo.paused = true;
+          jobInfo.pauseReason = 'kiwix_down';
+
+          await safeDbRun(`
+            UPDATE zim_indexing_status
+            SET status = 'paused'
+            WHERE zim_id = ?
+          `, [zim.id]);
+
+          zimLogger.indexing.warn('Pausing indexing - Kiwix is not responding', {
+            zimTitle: zim.title,
+            progress: `${jobInfo.indexed}/${jobInfo.total}`
+          });
+
+          continue; // Will wait in the pause loop above
+        }
+
+        // Quick health check
+        const isHealthy = await checkKiwixHealth();
+        if (!isHealthy) {
+          console.warn(`⚠️  Kiwix health check failed - pausing indexing for ${zim.title}`);
+          recordFailure();
+          jobInfo.paused = true;
+          jobInfo.pauseReason = 'kiwix_health_check_failed';
+
+          await safeDbRun(`
+            UPDATE zim_indexing_status
+            SET status = 'paused'
+            WHERE zim_id = ?
+          `, [zim.id]);
+
+          continue;
+        }
+      }
+
       const batch = articlesToIndex.slice(i, i + batchSize);
 
       for (const articleUrl of batch) {
+        // Check for cancellation before each article
+        if (jobInfo.cancelled) {
+          console.log(`Indexing cancelled for ${zim.title} at ${jobInfo.indexed}/${jobInfo.total} articles`);
+          throw new Error('Indexing cancelled by user');
+        }
+
         try {
           await indexSingleArticle(zim, articleUrl, kiwixBaseUrl);
           jobInfo.indexed++;
+
+          // Record success for circuit breaker (every 50 articles to avoid overhead)
+          if (jobInfo.indexed % 50 === 0) {
+            recordSuccess();
+          }
 
           // Update progress every 10 articles
           if (jobInfo.indexed % 10 === 0) {
@@ -305,19 +515,99 @@ async function indexZIMArticles(zim, options) {
               WHERE zim_id = ?
             `, [jobInfo.indexed, progress, zim.id]);
 
-            console.log(`Progress: ${jobInfo.indexed}/${jobInfo.total} (${progress.toFixed(1)}%)`);
+            zimLogger.indexing.verbose(`Progress: ${jobInfo.indexed}/${jobInfo.total} (${progress.toFixed(1)}%)`);
           }
         } catch (err) {
           jobInfo.errors++;
-          console.error(`Error indexing article ${articleUrl}:`, err.message);
+
+          // Categorize the error
+          let errorType = 'other';
+          let isConnectionError = false;
+
+          if (err.response?.status === 404) {
+            errorType = '404_not_found';
+          } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET') {
+            errorType = 'connection_error';
+            isConnectionError = true;
+            recordFailure(); // Record in circuit breaker
+          } else if (err.message.includes('timeout')) {
+            errorType = 'timeout';
+            isConnectionError = true;
+            recordFailure(); // Record in circuit breaker
+          } else if (typeof err.response?.data !== 'string' || !err.response?.data.includes('<')) {
+            errorType = 'non_html_content';
+          }
+
+          // Track error types
+          jobInfo.errorTypes[errorType] = (jobInfo.errorTypes[errorType] || 0) + 1;
+
+          // Only store first 5 error samples for later reporting
+          if (jobInfo.errorSamples.length < 5) {
+            jobInfo.errorSamples.push({
+              article: articleUrl,
+              error: err.message,
+              type: errorType
+            });
+          }
+
+          // Only log the first 10 unexpected errors to avoid spam
+          if (jobInfo.errors <= 10 && errorType !== '404_not_found' && errorType !== 'non_html_content') {
+            zimLogger.indexing.warn(`Error indexing article: ${articleUrl}`, {
+              error: err.message,
+              errorType,
+              zimTitle: zim.title
+            });
+          } else if (jobInfo.errors === 11) {
+            // After 10 errors, log a summary message
+            zimLogger.indexing.info('Suppressing further error logs (will provide summary at end)', {
+              zimTitle: zim.title,
+              errorsLogged: 10
+            });
+          }
         }
       }
 
-      // Small delay between batches to avoid overwhelming the system
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Longer delay between batches to avoid overwhelming kiwix-serve
+      // Increased from 100ms to 500ms to reduce crash risk
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    console.log(`✓ Indexed ${jobInfo.indexed} articles from ${zim.title} (${jobInfo.errors} errors)`);
+    // If we completed without being paused/cancelled, reset circuit breaker
+    if (!jobInfo.cancelled && !jobInfo.paused) {
+      recordSuccess();
+    }
+
+    const errorRate = jobInfo.total > 0 ? ((jobInfo.errors / jobInfo.total) * 100).toFixed(1) : 0;
+    console.log(`✓ Indexed ${jobInfo.indexed} articles from ${zim.title}`);
+
+    if (jobInfo.errors > 0) {
+      // Create detailed error summary
+      const errorSummary = {
+        zimTitle: zim.title,
+        indexed: jobInfo.indexed,
+        totalErrors: jobInfo.errors,
+        errorRate: `${errorRate}%`,
+        errorBreakdown: jobInfo.errorTypes
+      };
+
+      // Add sample errors if any were collected
+      if (jobInfo.errorSamples.length > 0) {
+        errorSummary.sampleErrors = jobInfo.errorSamples.map(s => ({
+          article: s.article,
+          type: s.type,
+          message: s.error
+        }));
+      }
+
+      zimLogger.indexing.info(`Indexing completed with ${jobInfo.errors} skipped items (${errorRate}%)`, errorSummary);
+
+      // Log a user-friendly console message
+      console.log(`  Skipped ${jobInfo.errors} items (${errorRate}%):`);
+      for (const [type, count] of Object.entries(jobInfo.errorTypes)) {
+        const percentage = ((count / jobInfo.errors) * 100).toFixed(1);
+        console.log(`    - ${type}: ${count} (${percentage}%)`);
+      }
+    }
   } catch (err) {
     console.error('Error in indexZIMArticles:', err);
     throw err;
@@ -371,6 +661,18 @@ async function indexSingleArticle(zim, articlePath, baseUrl) {
     });
 
     const html = response.data;
+
+    // Validate that we got HTML content
+    if (typeof html !== 'string') {
+      // Skip non-HTML content silently (likely binary or JSON data)
+      return;
+    }
+
+    // Check if this looks like HTML at all
+    if (!html.includes('<') && !html.includes('>')) {
+      // Not HTML, skip it
+      return;
+    }
 
     // Extract title
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
@@ -524,6 +826,66 @@ export async function getAllIndexingStatuses() {
 }
 
 /**
+ * Resume a paused indexing job
+ */
+export async function resumeIndexing(zimId) {
+  try {
+    const job = activeJobs.get(zimId);
+    if (!job) {
+      throw new Error('No active indexing job for this ZIM');
+    }
+
+    if (!job.paused) {
+      return { message: 'Indexing is not paused', zimId };
+    }
+
+    // Resume the job
+    job.paused = false;
+    job.pauseReason = null;
+    console.log(`✅ Resuming indexing for ZIM ${zimId}: ${job.zimTitle}`);
+
+    await safeDbRun(`
+      UPDATE zim_indexing_status
+      SET status = 'indexing'
+      WHERE zim_id = ?
+    `, [zimId]);
+
+    zimLogger.indexing.info('Indexing resumed', {
+      zimTitle: job.zimTitle,
+      progress: `${job.indexed}/${job.total}`
+    });
+
+    return { message: 'Indexing resumed', zimId };
+  } catch (err) {
+    console.error('Error resuming indexing:', err);
+    throw err;
+  }
+}
+
+/**
+ * Resume all paused indexing jobs (called after kiwix-serve restarts)
+ */
+export async function resumeAllPausedJobs() {
+  const pausedJobs = Array.from(activeJobs.values()).filter(job => job.paused);
+
+  if (pausedJobs.length === 0) {
+    return { message: 'No paused jobs to resume', count: 0 };
+  }
+
+  console.log(`🔄 Resuming ${pausedJobs.length} paused indexing job(s)...`);
+
+  for (const job of pausedJobs) {
+    try {
+      await resumeIndexing(job.zimId);
+    } catch (err) {
+      console.error(`Failed to resume indexing for ZIM ${job.zimId}:`, err);
+    }
+  }
+
+  return { message: `Resumed ${pausedJobs.length} paused job(s)`, count: pausedJobs.length };
+}
+
+/**
  * Cancel indexing for a ZIM
  */
 export async function cancelIndexing(zimId) {
@@ -533,7 +895,9 @@ export async function cancelIndexing(zimId) {
       throw new Error('No active indexing job for this ZIM');
     }
 
-    activeJobs.delete(zimId);
+    // Set cancellation flag so the indexing loop can detect it
+    job.cancelled = true;
+    console.log(`Cancellation requested for ZIM ${zimId}: ${job.zimTitle}`);
 
     await safeDbRun(`
       UPDATE zim_indexing_status
@@ -621,6 +985,8 @@ export default {
   getIndexingStatus,
   getAllIndexingStatuses,
   cancelIndexing,
+  resumeIndexing,
+  resumeAllPausedJobs,
   clearIndexedArticles,
   searchIndexedArticles
 };
