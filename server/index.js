@@ -81,7 +81,7 @@ try {
       UPDATE zim_indexing_status
       SET status = 'failed',
           error_message = 'Indexing interrupted by application crash/restart'
-      WHERE status = 'indexing'
+      WHERE zim_indexing_status.status = 'indexing'
     `).run();
 
     console.log('   ✓ Reset stuck indexing jobs to failed state');
