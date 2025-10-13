@@ -53,6 +53,8 @@ const systemRoutes = (await import('./routes/system.js')).default;
 const searchRoutes = (await import('./routes/search.js')).default;
 const storageRoutes = (await import('./routes/storage.js')).default;
 const { startUpdateScheduler } = await import('./services/updateScheduler.js');
+const { handleUncaughtException, handleUnhandledRejection } = await import('./utils/crashReporter.js');
+const { startHealthMonitor, stopHealthMonitor } = await import('./services/healthMonitor.js');
 
 // Initialize database
 initDatabase();
@@ -62,6 +64,12 @@ setTimeout(() => {
   startKiwixServer();
   // Start the update scheduler (pass restartKiwixServer callback from zim routes)
   startUpdateScheduler(() => {
+    if (zimModule.restartKiwixServer) {
+      zimModule.restartKiwixServer();
+    }
+  });
+  // Start health monitoring service
+  startHealthMonitor(() => {
     if (zimModule.restartKiwixServer) {
       zimModule.restartKiwixServer();
     }
@@ -112,66 +120,20 @@ app.use(cors({
 }));
 
 // API Routes
-// Health check endpoint
+// Health check endpoint - uses the new health monitor
 app.get('/api/health', async (req, res) => {
   try {
-    const health = {
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      database: 'unknown',
-      kiwix: 'unknown',
-      databaseQueue: null
-    };
+    const { checkHealth } = await import('./services/healthMonitor.js');
+    const health = await checkHealth();
 
-    // Check database
-    try {
-      const { db, dbQueue } = await import('./database/init.js');
-      const result = db.prepare('SELECT 1 as test').get();
-      health.database = result?.test === 1 ? 'connected' : 'error';
-
-      // Add database queue statistics
-      health.databaseQueue = (await import('./database/queue.js')).dbQueue.getStats();
-    } catch (dbErr) {
-      health.database = 'error';
-      health.databaseError = dbErr.message;
-      health.status = 'degraded';
-
-      // Attempt to reconnect
-      try {
-        const { reconnectDatabase } = await import('./database/init.js');
-        const reconnectResult = reconnectDatabase();
-        if (reconnectResult.success) {
-          health.database = 'reconnected';
-          health.status = 'ok';
-          health.reconnectionAttempt = 'successful';
-        } else {
-          health.reconnectionAttempt = 'failed';
-        }
-      } catch (reconnectErr) {
-        health.reconnectionAttempt = 'failed';
-        health.reconnectionError = reconnectErr.message;
-      }
-    }
-
-    // Check kiwix
-    try {
-      const axios = (await import('axios')).default;
-      const KIWIX_PORT = process.env.KIWIX_PORT || 8080;
-      await axios.get(`http://localhost:${KIWIX_PORT}/catalog/v2/entries`, { timeout: 2000 });
-      health.kiwix = 'running';
-    } catch (kiwixErr) {
-      health.kiwix = 'not responding';
-      health.status = 'degraded';
-    }
-
-    const statusCode = health.status === 'ok' ? 200 : 503;
+    // Return appropriate HTTP status code
+    const statusCode = health.status === 'healthy' ? 200 : health.status === 'degraded' ? 503 : 503;
     res.status(statusCode).json(health);
   } catch (err) {
     res.status(500).json({
       status: 'error',
-      error: err.message
+      error: err.message,
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -206,9 +168,13 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+// Store server instance for graceful shutdown
+let server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`SafeHarbor server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+
+  // Notify systemd that we're ready (if running under systemd)
+  notifySystemd('READY=1');
 });
 
 // Periodic health monitoring
@@ -251,15 +217,100 @@ setInterval(async () => {
   }
 }, 120000); // Check every 120 seconds (reduced from 30s to minimize contention)
 
-// Global error handlers to prevent server crashes
-process.on('uncaughtException', (err) => {
-  console.error('❌ Uncaught Exception:', err);
-  console.error('Stack:', err.stack);
-  // Don't exit - log and continue
-});
+// Systemd notification helper
+function notifySystemd(message) {
+  if (process.env.NOTIFY_SOCKET) {
+    try {
+      import('child_process').then(({ execSync }) => {
+        execSync(`systemd-notify "${message}"`, { timeout: 1000 });
+      }).catch(() => {
+        // Silently ignore - not running under systemd or systemd-notify not available
+      });
+    } catch (err) {
+      // Silently ignore
+    }
+  }
+}
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Promise Rejection at:', promise);
-  console.error('Reason:', reason);
-  // Don't exit - log and continue
-});
+// Systemd watchdog pinger - ping every 30s (half of WatchdogSec=60)
+if (process.env.NOTIFY_SOCKET) {
+  setInterval(() => {
+    notifySystemd('WATCHDOG=1');
+  }, 30000);
+}
+
+// Global error handlers with crash reporting
+process.on('uncaughtException', handleUncaughtException);
+process.on('unhandledRejection', handleUnhandledRejection);
+
+// Graceful shutdown handler
+let isShuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) {
+    console.log('Already shutting down, please wait...');
+    return;
+  }
+
+  isShuttingDown = true;
+
+  console.log(`\n═══════════════════════════════════════════════`);
+  console.log(`Received ${signal} - Starting graceful shutdown...`);
+  console.log(`═══════════════════════════════════════════════\n`);
+
+  // Notify systemd that we're stopping
+  notifySystemd('STOPPING=1');
+
+  const shutdownTimeout = setTimeout(() => {
+    console.error('❌ Graceful shutdown timeout - forcing exit');
+    process.exit(1);
+  }, 28000); // Force exit after 28s (systemd gives us 30s)
+
+  try {
+    // Step 1: Stop accepting new connections
+    console.log('1. Stopping HTTP server...');
+    await new Promise((resolve, reject) => {
+      server.close((err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    console.log('   ✓ HTTP server stopped');
+
+    // Step 2: Stop health monitor
+    console.log('2. Stopping health monitor...');
+    stopHealthMonitor();
+    console.log('   ✓ Health monitor stopped');
+
+    // Step 3: Wait for ongoing requests (give them 5s)
+    console.log('3. Waiting for active requests to complete...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    console.log('   ✓ Active requests completed');
+
+    // Step 4: Close database connections
+    console.log('4. Closing database connections...');
+    try {
+      const { db } = await import('./database/init.js');
+      db.close();
+      console.log('   ✓ Database closed');
+    } catch (err) {
+      console.error('   ⚠️  Database close warning:', err.message);
+    }
+
+    // Step 5: All done
+    clearTimeout(shutdownTimeout);
+    console.log('\n═══════════════════════════════════════════════');
+    console.log('✓ Graceful shutdown completed');
+    console.log('═══════════════════════════════════════════════\n');
+
+    process.exit(0);
+  } catch (err) {
+    console.error('❌ Error during graceful shutdown:', err);
+    clearTimeout(shutdownTimeout);
+    process.exit(1);
+  }
+}
+
+// Register shutdown handlers
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

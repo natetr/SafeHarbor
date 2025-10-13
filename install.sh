@@ -150,25 +150,65 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
   chmod 600 .env
 fi
 
-# Create systemd service
+# Create systemd service with enhanced crash recovery
 echo "Creating systemd service..."
-cat > /etc/systemd/system/safeharbor.service <<EOF
+cat > /etc/systemd/system/safeharbor.service <<'EOF'
 [Unit]
-Description=SafeHarbor Offline Knowledge Hub
+Description=SafeHarbor - Offline Knowledge Hub
+Documentation=https://github.com/natetr/SafeHarbor
 After=network.target
+Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 User=safeharbor
-WorkingDirectory=$INSTALL_DIR
+WorkingDirectory=/opt/safeharbor
+ExecStart=/usr/bin/node /opt/safeharbor/server/index.js
+
+# Environment
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node $INSTALL_DIR/server/index.js
+
+# Restart policy - only restart on failure, not on intentional exit
 Restart=on-failure
 RestartSec=10
 
-# Security
+# Restart throttling - prevent restart loops
+# Max 5 restarts within 10 minutes, then give up
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+# Don't restart if app exits with these codes (intentional shutdown)
+RestartPreventExitStatus=0 2
+
+# Watchdog - app must ping systemd every 60s or it will be restarted
+# This catches hung processes that don't crash but stop responding
+WatchdogSec=60
+
+# Graceful shutdown - give app 30s to clean up before SIGKILL
+TimeoutStopSec=30
+
+# Resource limits
+LimitNOFILE=65536
+
+# Task limits to prevent fork bombs
+TasksMax=512
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=safeharbor
+
+# Security hardening
 NoNewPrivileges=true
 PrivateTmp=true
+
+# Protect system directories
+ProtectSystem=strict
+# Allow writing to these directories
+ReadWritePaths=/opt/safeharbor /tmp
+
+# Protect home directory
+ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target

@@ -26,6 +26,7 @@ let restartPending = false; // Track if a restart is queued
 let restartTimer = null; // Timer for debounced restart
 let serverBootTime = Date.now(); // Track when the server started
 let zimCrashHistory = new Map(); // Track crash history: zimId -> { count, lastCrash }
+let gracePeriodCrashes = []; // Track crashes during grace period to detect repeated failures
 
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
@@ -96,9 +97,26 @@ async function logZimActivity(action, options = {}) {
   }
 }
 
+// Helper function to check if port is free
+function isPortFree(port) {
+  try {
+    const output = execSync(`lsof -ti:${port} 2>/dev/null || echo "free"`, { encoding: 'utf8' }).trim();
+    return output === 'free' || output === '';
+  } catch (err) {
+    // If lsof fails, try fuser
+    try {
+      execSync(`fuser ${port}/tcp 2>/dev/null`, { encoding: 'utf8' });
+      return false; // fuser found something
+    } catch (fuserErr) {
+      return true; // fuser found nothing (exit code != 0)
+    }
+  }
+}
+
 // Helper function to kill any existing kiwix-serve processes on the target port
 // This prevents "port already in use" errors when the app restarts after a crash
-function killExistingKiwixProcesses() {
+// CRITICAL: This MUST complete before attempting to start kiwix-serve
+async function killExistingKiwixProcesses() {
   try {
     zimLogger.kiwix.detail('Checking for orphaned kiwix-serve processes', { port: KIWIX_PORT });
 
@@ -123,13 +141,13 @@ function killExistingKiwixProcesses() {
       } catch (fuserError) {
         // Neither command worked or no processes found - that's fine
         zimLogger.kiwix.verbose('No orphaned kiwix-serve processes found');
-        return;
+        return true; // Port is free
       }
     }
 
     if (pids.length === 0) {
       zimLogger.kiwix.verbose('No orphaned kiwix-serve processes found');
-      return;
+      return true; // Port is free
     }
 
     zimLogger.kiwix.warn(`Found ${pids.length} orphaned process(es) on port ${KIWIX_PORT}`, { pids });
@@ -140,25 +158,30 @@ function killExistingKiwixProcesses() {
         zimLogger.kiwix.info(`Killing orphaned process`, { pid, port: KIWIX_PORT });
         process.kill(pid, 'SIGTERM');
 
-        // Give it a moment to terminate gracefully
-        const startTime = Date.now();
-        while (Date.now() - startTime < 1000) {
+        // Wait up to 2 seconds for graceful termination
+        let terminated = false;
+        for (let i = 0; i < 20; i++) {
+          await new Promise(resolve => setTimeout(resolve, 100));
           try {
             process.kill(pid, 0); // Check if process still exists
           } catch (e) {
             // Process is gone - good!
-            zimLogger.kiwix.success('Process terminated successfully', { pid });
+            zimLogger.kiwix.success('Process terminated gracefully', { pid });
+            terminated = true;
             break;
           }
         }
 
-        // If still running, force kill
-        try {
-          process.kill(pid, 0);
-          zimLogger.kiwix.warn('Process still running, force killing', { pid });
-          process.kill(pid, 'SIGKILL');
-        } catch (e) {
-          // Already dead
+        // If still running after 2s, force kill
+        if (!terminated) {
+          try {
+            process.kill(pid, 0);
+            zimLogger.kiwix.warn('Process still running, force killing', { pid });
+            process.kill(pid, 'SIGKILL');
+            await new Promise(resolve => setTimeout(resolve, 500)); // Wait for SIGKILL
+          } catch (e) {
+            // Already dead
+          }
         }
       } catch (killError) {
         // Process might already be gone or we don't have permission
@@ -169,9 +192,22 @@ function killExistingKiwixProcesses() {
       }
     }
 
-    zimLogger.kiwix.success('Cleaned up orphaned kiwix-serve processes', {
-      killedCount: pids.length
+    // Verify port is actually free now (critical step!)
+    // Wait up to 3 seconds for the port to be released by the OS
+    for (let i = 0; i < 30; i++) {
+      if (isPortFree(KIWIX_PORT)) {
+        zimLogger.kiwix.success('Port is now free', { port: KIWIX_PORT, killedCount: pids.length });
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    // Port still not free after 3 seconds - warn but continue
+    zimLogger.kiwix.error('Port may still be in use after cleanup', {
+      port: KIWIX_PORT,
+      note: 'Kiwix may fail to start'
     });
+    return false;
 
   } catch (err) {
     // Log but don't fail - this is a best-effort cleanup
@@ -179,13 +215,25 @@ function killExistingKiwixProcesses() {
       error: err.message,
       note: 'Continuing with startup anyway'
     });
+    return false;
   }
 }
 
 // Start Kiwix server
 async function startKiwixServer() {
   // First, kill any orphaned kiwix-serve processes from previous runs
-  killExistingKiwixProcesses();
+  // CRITICAL: Must await this to ensure port is free before starting
+  const portIsReady = await killExistingKiwixProcesses();
+
+  if (!portIsReady) {
+    zimLogger.kiwix.error('Cannot start Kiwix - port is not available', {
+      port: KIWIX_PORT,
+      note: 'Another process may be using this port. Will retry in 10 seconds.'
+    });
+    // Retry after a longer delay to avoid false ZIM quarantines
+    setTimeout(() => startKiwixServer(), 10000);
+    return;
+  }
 
   if (kiwixProcess) {
     zimLogger.kiwix.verbose('Kiwix server already running - skipping start');
@@ -250,18 +298,44 @@ async function startKiwixServer() {
 
       // Grace period: Don't quarantine anything within first 30 seconds of server boot
       // This prevents false positives during initial startup when ZIM validation is slow
+      // HOWEVER: If we see 3+ crashes during grace period, override it
+      let shouldOverrideGracePeriod = false;
       if (timeSinceBoot < 30) {
-        zimLogger.kiwix.warn('Within startup grace period (30s) - not quarantining ZIMs', {
-          timeSinceBoot: `${timeSinceBoot}s`,
+        // Record this crash
+        gracePeriodCrashes.push({
+          timestamp: Date.now(),
           exitCode: code,
-          uptime: `${uptime}s`
+          uptime,
+          timeSinceBoot
         });
-        isRestarting = false;
-        kiwixProcess = null;
-        kiwixStartTime = null;
-        // Retry after grace period
-        setTimeout(() => startKiwixServer(), 5000);
-        return;
+
+        // Clean up old crashes (keep last 10)
+        if (gracePeriodCrashes.length > 10) {
+          gracePeriodCrashes = gracePeriodCrashes.slice(-10);
+        }
+
+        // Check if we've seen 3+ crashes during grace period
+        if (gracePeriodCrashes.length >= 3) {
+          zimLogger.kiwix.error('Multiple crashes detected during grace period!', {
+            crashCount: gracePeriodCrashes.length,
+            timeSinceBoot: `${timeSinceBoot}s`,
+            note: 'Overriding grace period to quarantine problematic ZIM'
+          });
+          shouldOverrideGracePeriod = true;
+        } else {
+          zimLogger.kiwix.warn('Within startup grace period (30s) - not quarantining yet', {
+            timeSinceBoot: `${timeSinceBoot}s`,
+            exitCode: code,
+            uptime: `${uptime}s`,
+            gracePeriodCrashes: gracePeriodCrashes.length
+          });
+          isRestarting = false;
+          kiwixProcess = null;
+          kiwixStartTime = null;
+          // Retry after a short delay
+          setTimeout(() => startKiwixServer(), 5000);
+          return;
+        }
       }
 
       // Detect crash - only quarantine on actual crashes, not intentional restarts
@@ -278,6 +352,21 @@ async function startKiwixServer() {
           intentionalRestart: isRestarting,
           crashType: code !== 0 ? 'non-zero-exit' : 'premature-exit'
         });
+
+        // CRITICAL: Check if this was a port conflict - DON'T blame ZIMs if it was
+        // Port conflicts are infrastructure issues, not ZIM issues
+        if (!isPortFree(KIWIX_PORT)) {
+          zimLogger.kiwix.error('Crash appears to be port conflict, not ZIM issue', {
+            port: KIWIX_PORT,
+            note: 'Port is occupied by another process. Not quarantining ZIMs.'
+          });
+          isRestarting = false;
+          kiwixProcess = null;
+          kiwixStartTime = null;
+          // Retry with a longer delay
+          setTimeout(() => startKiwixServer(), 10000);
+          return;
+        }
 
         let zimToQuarantine = null;
 

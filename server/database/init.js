@@ -20,24 +20,164 @@ if (!fs.existsSync(dbDir) && dbDir !== '.') {
   }
 }
 
-// Create database connection with error handling
+// Database backup and recovery functions
+function createBackup() {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+    const backupPath = `${DB_PATH}.backup-${timestamp}`;
+
+    if (fs.existsSync(DB_PATH)) {
+      fs.copyFileSync(DB_PATH, backupPath);
+      console.log(`✓ Database backup created: ${backupPath}`);
+
+      // Keep only last 5 backups
+      const backupFiles = fs.readdirSync(dbDir)
+        .filter(f => f.startsWith(path.basename(DB_PATH) + '.backup-'))
+        .sort()
+        .reverse();
+
+      if (backupFiles.length > 5) {
+        backupFiles.slice(5).forEach(f => {
+          const oldBackupPath = path.join(dbDir, f);
+          fs.unlinkSync(oldBackupPath);
+          console.log(`✓ Removed old backup: ${f}`);
+        });
+      }
+
+      return backupPath;
+    }
+    return null;
+  } catch (err) {
+    console.error('⚠️ Failed to create database backup:', err.message);
+    return null;
+  }
+}
+
+function checkDatabaseIntegrity(database) {
+  try {
+    const result = database.pragma('integrity_check');
+    if (result && result.length > 0 && result[0].integrity_check === 'ok') {
+      return { ok: true };
+    }
+    return { ok: false, error: 'Integrity check failed', details: result };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+function restoreFromBackup() {
+  try {
+    console.log('🔄 Attempting to restore database from backup...');
+
+    // Find the most recent backup
+    const backupFiles = fs.readdirSync(dbDir)
+      .filter(f => f.startsWith(path.basename(DB_PATH) + '.backup-'))
+      .sort()
+      .reverse();
+
+    if (backupFiles.length === 0) {
+      console.error('❌ No backup files found');
+      return false;
+    }
+
+    const latestBackup = path.join(dbDir, backupFiles[0]);
+    console.log(`Found backup: ${backupFiles[0]}`);
+
+    // Move corrupted database out of the way
+    const corruptPath = `${DB_PATH}.corrupt-${Date.now()}`;
+    fs.renameSync(DB_PATH, corruptPath);
+    console.log(`✓ Moved corrupted database to: ${corruptPath}`);
+
+    // Restore from backup
+    fs.copyFileSync(latestBackup, DB_PATH);
+    console.log(`✓ Restored database from backup: ${backupFiles[0]}`);
+
+    return true;
+  } catch (err) {
+    console.error('❌ Failed to restore from backup:', err.message);
+    return false;
+  }
+}
+
+// Create database connection with corruption detection and auto-recovery
 let db;
+let dbCorrupted = false;
+
 try {
   db = new Database(DB_PATH);
+
+  // Check database integrity on startup
+  console.log('Checking database integrity...');
+  const integrityCheck = checkDatabaseIntegrity(db);
+
+  if (!integrityCheck.ok) {
+    console.error('\n⚠️  Database corruption detected!');
+    console.error('Error:', integrityCheck.error);
+    dbCorrupted = true;
+    db.close();
+  } else {
+    console.log('✓ Database integrity check passed');
+  }
 } catch (err) {
   console.error('\n❌ Failed to open database:', DB_PATH);
   console.error('Error:', err.message);
 
-  if (err.code === 'SQLITE_CANTOPEN') {
+  // Check if this is a corruption error
+  if (err.message && err.message.includes('malformed')) {
+    console.error('\n⚠️  Database appears to be corrupted');
+    dbCorrupted = true;
+  } else if (err.code === 'SQLITE_CANTOPEN') {
     console.error('\nThis is likely a permissions issue.');
     console.error('If using /var/safeharbor/, run the setup script:');
     console.error('  sudo ./scripts/setup.sh');
     console.error('\nOr check that the directory exists and is writable:');
     console.error('  ls -la', dbDir);
+    console.error('');
+    process.exit(1);
+  } else {
+    console.error('');
+    process.exit(1);
   }
+}
 
-  console.error('');
-  process.exit(1);
+// If database is corrupted, attempt recovery
+if (dbCorrupted) {
+  console.log('\n═══════════════════════════════════════════════');
+  console.log('DATABASE CORRUPTION DETECTED');
+  console.log('═══════════════════════════════════════════════\n');
+
+  const restored = restoreFromBackup();
+
+  if (restored) {
+    console.log('✓ Database restored from backup, attempting to reconnect...\n');
+
+    try {
+      db = new Database(DB_PATH);
+
+      // Verify restored database
+      const integrityCheck = checkDatabaseIntegrity(db);
+      if (!integrityCheck.ok) {
+        console.error('❌ Restored database is also corrupted!');
+        console.error('This is a critical error - manual intervention required');
+        process.exit(1);
+      }
+
+      console.log('✓ Restored database integrity verified');
+      console.log('\n═══════════════════════════════════════════════');
+      console.log('DATABASE RECOVERY SUCCESSFUL');
+      console.log('═══════════════════════════════════════════════\n');
+    } catch (err) {
+      console.error('❌ Failed to open restored database:', err.message);
+      process.exit(1);
+    }
+  } else {
+    console.error('❌ Could not restore database from backup');
+    console.error('This is a critical error - manual intervention required');
+    console.error('\nPossible solutions:');
+    console.error('1. Restore from an external backup if available');
+    console.error('2. Delete the corrupted database and start fresh (DATA LOSS!)');
+    process.exit(1);
+  }
 }
 
 // Safe database wrapper that queues operations to prevent crashes
@@ -184,7 +324,7 @@ export function queuedPrepare(query) {
   return stmt;
 }
 
-export { db };
+export { db, createBackup };
 
 // Configure database for production use with concurrent access
 configureDatabasePragmas(db);
@@ -207,6 +347,25 @@ setInterval(() => {
     console.error('❌ Failed to queue WAL checkpoint:', err);
   });
 }, 300000); // Every 5 minutes (reduced from 1 minute)
+
+// Automatic database backup - every hour
+// This ensures we always have recent backups for corruption recovery
+setInterval(() => {
+  try {
+    createBackup();
+  } catch (err) {
+    console.error('❌ Automatic backup error:', err.message);
+  }
+}, 3600000); // Every hour
+
+// Create initial backup on startup
+setTimeout(() => {
+  try {
+    createBackup();
+  } catch (err) {
+    console.error('❌ Initial backup error:', err.message);
+  }
+}, 60000); // After 1 minute of runtime
 
 export function initDatabase() {
   // Users table
