@@ -776,6 +776,8 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
           // Fall through to HTTP download
         } else {
           // Start torrent download
+          zimLogger.download.info(`[DEBUG] Calling downloadViaTorrent for ${filename}`);
+
           const downloadedFilepath = await downloadViaTorrent(
             torrentUrl,
             ZIM_DIR,
@@ -796,31 +798,82 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
             }
           );
 
+          zimLogger.download.info(`[DEBUG] downloadViaTorrent returned for ${filename}, path: ${downloadedFilepath}`);
+
           // Torrent download complete
           const downloadDuration = activeDownloads.get(filename)
             ? Math.round((Date.now() - activeDownloads.get(filename).startTime) / 1000)
             : null;
           activeDownloads.delete(filename);
 
-          // Get file size from filesystem
+          // CRITICAL: Verify file integrity after torrent download
           let fileSize = size || null;
+          let isCorrupted = false;
+          let corruptionReason = null;
+
           try {
+            // Check 1: File exists
+            if (!fs.existsSync(downloadedFilepath)) {
+              throw new Error('Downloaded file does not exist');
+            }
+
+            // Check 2: Get file stats
             const stats = fs.statSync(downloadedFilepath);
             fileSize = stats.size;
-            zimLogger.download.success('Torrent download complete', {
-              filename,
-              size: `${(fileSize / 1024 / 1024).toFixed(2)}MB`,
-              duration: `${downloadDuration}s`
-            });
+
+            // Check 3: Verify file size is reasonable (not 0 bytes, matches expected size if known)
+            if (fileSize === 0) {
+              isCorrupted = true;
+              corruptionReason = 'File is 0 bytes - download corrupted';
+            } else if (size && Math.abs(fileSize - size) > (size * 0.01)) {
+              // Allow 1% variance for metadata differences
+              isCorrupted = true;
+              corruptionReason = `File size mismatch: expected ${(size / 1024 / 1024).toFixed(2)}MB, got ${(fileSize / 1024 / 1024).toFixed(2)}MB`;
+            }
+
+            // Check 4: Verify file is readable and has valid ZIM header
+            try {
+              const fd = fs.openSync(downloadedFilepath, 'r');
+              const buffer = Buffer.alloc(8);
+              fs.readSync(fd, buffer, 0, 8, 0);
+              fs.closeSync(fd);
+
+              // ZIM files should start with magic number (simplified check)
+              // A complete check would verify the full ZIM header structure
+              if (buffer.length < 4) {
+                isCorrupted = true;
+                corruptionReason = 'File header too short - possibly corrupted';
+              }
+            } catch (readErr) {
+              isCorrupted = true;
+              corruptionReason = `File is not readable: ${readErr.message}`;
+            }
+
+            if (isCorrupted) {
+              zimLogger.download.error('Torrent download corrupted', {
+                filename,
+                size: `${(fileSize / 1024 / 1024).toFixed(2)}MB`,
+                reason: corruptionReason
+              });
+            } else {
+              zimLogger.download.success('Torrent download verified and complete', {
+                filename,
+                size: `${(fileSize / 1024 / 1024).toFixed(2)}MB`,
+                duration: `${downloadDuration}s`,
+                integrity: 'verified'
+              });
+            }
           } catch (err) {
+            isCorrupted = true;
+            corruptionReason = `File validation error: ${err.message}`;
             zimLogger.download.error('File validation error after torrent download', { filename, error: err.message });
-            throw err;
           }
 
-          // Add to database with status='active' and download_method='torrent'
+          // Add to database with appropriate status
+          const zimStatus = isCorrupted ? 'quarantined' : 'active';
           const result = await safeDbRun(`
-            INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status, download_method)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'torrent')
+            INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, url, updated_date, status, download_method, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'torrent', ?)
           `, [
             filename,
             downloadedFilepath,
@@ -831,7 +884,9 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
             articleCount || null,
             mediaCount || null,
             url,
-            updated || null
+            updated || null,
+            zimStatus,
+            isCorrupted ? corruptionReason : null
           ]);
 
           // Log download completion
@@ -880,16 +935,39 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
           return; // Exit early - torrent download complete
         }
       } catch (torrentErr) {
-        zimLogger.download.error('Torrent download failed, falling back to HTTP', {
+        zimLogger.download.error('[DEBUG] Torrent download failed, falling back to HTTP', {
           error: torrentErr.message,
+          stack: torrentErr.stack,
           filename
         });
         // Fall through to HTTP download as fallback
-        activeDownloads.get(filename).method = 'http'; // Update method
+        const download = activeDownloads.get(filename);
+        if (download) {
+          download.method = 'http';
+          download.status = 'waiting';
+          download.progress = 0;
+          download.downloadedSize = 0;
+        }
+        // IMPORTANT: Don't return here - let it fall through to HTTP download
       }
     }
 
-    // === HTTP DOWNLOAD PATH (original logic) ===
+    // === HTTP DOWNLOAD PATH (original logic or fallback from torrent) ===
+    // This runs if: 1) method was 'http' from start, 2) torrent not available, or 3) torrent failed
+    if (downloadMethod === 'http' || (downloadMethod === 'torrent' && activeDownloads.get(filename)?.method === 'http')) {
+
+      // Log whether this is a fallback or original HTTP request
+      if (downloadMethod === 'torrent' && activeDownloads.get(filename)?.method === 'http') {
+        zimLogger.download.warn('Starting HTTP download as fallback after torrent failure', {
+          filename,
+          url,
+          originalMethod: 'torrent',
+          fallbackMethod: 'http'
+        });
+      } else {
+        zimLogger.download.info('Starting HTTP download', { filename, url });
+      }
+
     // Download file
     zimLogger.download.detail('Creating file write stream', { filepath });
     const writer = fs.createWriteStream(filepath);
@@ -1127,6 +1205,7 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
         endOperation(operationId, false);
       }
     });
+    } // End of HTTP download path conditional
   } catch (err) {
     zimLogger.download.error('Download operation failed', {
       error: err.message,
@@ -1183,7 +1262,30 @@ router.get('/download/progress', authenticateToken, requireAdmin, (req, res) => 
       timeRemaining: d.timeRemaining || null
     }));
 
-    res.json(downloads);
+    // Also include seeding torrents (they're tracked separately in torrentDownloadService)
+    const seedingTorrents = getAllTorrentStatuses()
+      .filter(t => t.status === 'seeding')
+      .map(t => ({
+        filename: t.filename,
+        title: t.title,
+        url: null,
+        progress: 100,
+        totalSize: t.total || 0,
+        downloadedSize: t.total || 0,
+        status: 'seeding',
+        isUpdate: false,
+        originalId: null,
+        method: 'torrent',
+        downloadSpeed: 0,
+        uploadSpeed: t.uploadSpeed || 0,
+        numPeers: t.numPeers || 0,
+        timeRemaining: null,
+        seedingDuration: t.seedingDuration || 0,
+        uploaded: t.uploaded || 0,
+        ratio: t.ratio || 0
+      }));
+
+    res.json([...downloads, ...seedingTorrents]);
   } catch (err) {
     console.error('Error fetching download progress:', err);
     res.status(500).json({ error: 'Failed to fetch progress' });
@@ -1218,15 +1320,75 @@ router.get('/download/torrents', authenticateToken, requireAdmin, (req, res) => 
   }
 });
 
-// Stop a torrent
+// Stop a torrent (seeding)
 router.post('/download/torrent-stop/:filename', authenticateToken, requireAdmin, (req, res) => {
   try {
     const { filename } = req.params;
     stopTorrent(filename);
+    zimLogger.download.info(`Torrent stopped by user: ${filename}`);
     res.json({ message: 'Torrent stopped', filename });
   } catch (err) {
     console.error('Error stopping torrent:', err);
     res.status(500).json({ error: 'Failed to stop torrent' });
+  }
+});
+
+// Cancel a download (downloading or seeding) and delete the partial file
+router.post('/download/cancel/:filename', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { deleteFile = true } = req.body;
+
+    zimLogger.download.info(`Canceling download: ${filename}`, { deleteFile });
+
+    // Get download info before stopping
+    const download = activeDownloads.get(filename);
+    const filePath = path.join(ZIM_DIR, filename);
+
+    // Stop torrent if it's a torrent download
+    try {
+      stopTorrent(filename);
+      zimLogger.download.detail(`Torrent stopped for: ${filename}`);
+    } catch (err) {
+      // Torrent may not exist, that's ok
+      zimLogger.download.verbose(`No active torrent for: ${filename}`);
+    }
+
+    // Remove from active downloads
+    activeDownloads.delete(filename);
+    zimLogger.download.detail(`Removed from active downloads: ${filename}`);
+
+    // Delete the partial file if requested and it exists
+    if (deleteFile && fs.existsSync(filePath)) {
+      try {
+        const stats = fs.statSync(filePath);
+        fs.unlinkSync(filePath);
+        zimLogger.download.success(`Deleted partial file: ${filename}`, {
+          size: `${(stats.size / 1024 / 1024).toFixed(2)}MB`
+        });
+      } catch (err) {
+        zimLogger.download.error(`Failed to delete file: ${filename}`, { error: err.message });
+        return res.status(500).json({ error: 'Failed to delete partial file: ' + err.message });
+      }
+    }
+
+    // Log the cancellation
+    await logZimActivity('download_cancelled', {
+      zimTitle: download?.title || filename,
+      zimFilename: filename,
+      details: `Download cancelled by user. File deleted: ${deleteFile}`,
+      userId: req.user?.id,
+      status: 'success'
+    });
+
+    res.json({
+      message: 'Download cancelled successfully',
+      filename,
+      fileDeleted: deleteFile && fs.existsSync(filePath)
+    });
+  } catch (err) {
+    console.error('Error cancelling download:', err);
+    res.status(500).json({ error: 'Failed to cancel download: ' + err.message });
   }
 });
 

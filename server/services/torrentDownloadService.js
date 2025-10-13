@@ -64,7 +64,7 @@ export function getTorrentConfig() {
 }
 
 /**
- * Download a ZIM file via torrent
+ * Download a ZIM file via torrent with proper completion detection
  * @param {string} torrentUrl - URL to .torrent file or magnet link
  * @param {string} downloadPath - Directory to download to
  * @param {Object} metadata - ZIM metadata (title, size, etc)
@@ -81,139 +81,294 @@ export function downloadViaTorrent(torrentUrl, downloadPath, metadata = {}, onPr
       downloadPath
     });
 
-    // Add torrent
-    client.add(torrentUrl, { path: downloadPath }, (torrent) => {
-      const torrentFilename = torrent.files[0]?.name || filename;
-      const finalPath = path.join(downloadPath, torrentFilename);
+    // CRITICAL: Attach event listeners IMMEDIATELY, not in callback
+    const torrent = client.add(torrentUrl, { path: downloadPath });
 
-      zimLogger.download.detail('Torrent added successfully', {
-        infoHash: torrent.infoHash,
-        name: torrent.name,
-        files: torrent.files.length
+    let torrentFilename = filename; // Will be updated when metadata is ready
+    let finalPath = path.join(downloadPath, torrentFilename);
+    let downloadStarted = false;
+    let manualCompletionTriggered = false;
+    let progressInterval = null;
+    let downloadEventCount = 0;
+    let lastDownloadedBytes = 0;
+    let stuckCounter = 0;
+    let timeAtHighProgress = null;
+
+    // Track torrent info
+    const torrentInfo = {
+      torrent,
+      filename: torrentFilename,
+      title: title || torrentFilename,
+      metadata,
+      startTime: Date.now(),
+      infoHash: null,
+      status: 'initializing',
+      progress: 0,
+      downloadSpeed: 0,
+      uploadSpeed: 0,
+      numPeers: 0,
+      downloaded: 0,
+      total: 0,
+      timeRemaining: null
+    };
+
+    // Helper function to handle completion
+    const handleCompletion = async () => {
+      if (manualCompletionTriggered) return;
+      manualCompletionTriggered = true;
+
+      if (progressInterval) {
+        clearInterval(progressInterval);
+      }
+
+      const duration = Math.round((Date.now() - torrentInfo.startTime) / 1000);
+
+      zimLogger.download.info(`Torrent download completing`, {
+        filename: torrentFilename,
+        duration: `${duration}s`,
+        downloaded: torrent.downloaded,
+        length: torrent.length,
+        progress: `${Math.round(torrent.progress * 100)}%`
       });
 
-      // Track this torrent
-      const torrentInfo = {
-        torrent,
-        filename: torrentFilename,
-        title: title || torrentFilename,
-        metadata,
-        startTime: Date.now(),
-        infoHash: torrent.infoHash,
-        status: 'downloading',
-        progress: 0,
-        downloadSpeed: 0,
-        uploadSpeed: 0,
-        numPeers: 0,
-        downloaded: 0,
-        total: 0,
-        timeRemaining: null
-      };
+      // Wait for file system to flush
+      await new Promise(resolve => setTimeout(resolve, 5000));
 
-      activeTorrents.set(torrentFilename, torrentInfo);
+      // Verify file exists and is complete
+      try {
+        const stats = fs.statSync(finalPath);
+        const sizeDiff = Math.abs(stats.size - torrent.length);
+        const tolerance = Math.max(65536, torrent.length * 0.001); // 64KB or 0.1%
 
-      // Progress tracking
-      const progressInterval = setInterval(() => {
-        if (!torrent || torrent.done) {
-          clearInterval(progressInterval);
-          return;
+        if (sizeDiff > tolerance) {
+          throw new Error(`File size mismatch: expected ${torrent.length}, got ${stats.size}`);
         }
 
-        const progress = Math.round(torrent.progress * 100);
-        const downloaded = torrent.downloaded;
-        const total = torrent.length;
-        const downloadSpeed = torrent.downloadSpeed;
-        const uploadSpeed = torrent.uploadSpeed;
-        const numPeers = torrent.numPeers;
-        const timeRemaining = torrent.timeRemaining;
+        // Try to open file to ensure it's readable
+        const fd = fs.openSync(finalPath, 'r');
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
 
-        // Update torrent info
-        torrentInfo.progress = progress;
-        torrentInfo.downloaded = downloaded;
-        torrentInfo.total = total;
-        torrentInfo.downloadSpeed = downloadSpeed;
-        torrentInfo.uploadSpeed = uploadSpeed;
-        torrentInfo.numPeers = numPeers;
-        torrentInfo.timeRemaining = timeRemaining;
-
-        // Call progress callback
-        if (onProgress) {
-          onProgress({
-            progress,
-            downloaded,
-            total,
-            downloadSpeed,
-            uploadSpeed,
-            numPeers,
-            timeRemaining,
-            filename: torrentFilename
-          });
-        }
-
-        // Log progress every 10%
-        if (progress % 10 === 0 && progress !== torrentInfo.lastLoggedProgress) {
-          torrentInfo.lastLoggedProgress = progress;
-          zimLogger.download.detail(`Torrent progress: ${progress}%`, {
-            filename: torrentFilename,
-            downloaded: `${(downloaded / 1024 / 1024).toFixed(2)}MB`,
-            total: `${(total / 1024 / 1024).toFixed(2)}MB`,
-            speed: `↓${(downloadSpeed / 1024 / 1024).toFixed(2)}MB/s ↑${(uploadSpeed / 1024 / 1024).toFixed(2)}MB/s`,
-            peers: numPeers
-          });
-        }
-      }, 1000);
-
-      // Download complete
-      torrent.on('done', () => {
-        clearInterval(progressInterval);
-
-        const duration = Math.round((Date.now() - torrentInfo.startTime) / 1000);
-        zimLogger.download.success(`Torrent download complete: ${torrentFilename}`, {
-          duration: `${duration}s`,
-          size: `${(torrent.length / 1024 / 1024 / 1024).toFixed(2)}GB`
+        zimLogger.download.success(`Torrent download verified and complete: ${torrentFilename}`, {
+          size: `${(stats.size / 1024 / 1024).toFixed(2)}MB`,
+          duration: `${duration}s`
         });
 
         torrentInfo.status = 'completed';
-        torrentInfo.progress = 100;
+        activeTorrents.set(torrentFilename, torrentInfo);
 
         // Handle seeding
         if (config.seedAfterDownload) {
           torrentInfo.status = 'seeding';
-          zimLogger.download.info(`Seeding torrent: ${torrentFilename}`, {
-            duration: config.seedDurationHours === -1 ? 'unlimited' : `${config.seedDurationHours}h`
-          });
+          torrentInfo.seedingStartTime = Date.now();
+          zimLogger.download.info(`Seeding torrent: ${torrentFilename}`);
 
-          // Stop seeding after configured duration
           if (config.seedDurationHours > 0) {
             setTimeout(() => {
               stopTorrent(torrentFilename);
             }, config.seedDurationHours * 60 * 60 * 1000);
           }
-          // If seedDurationHours === -1, seed indefinitely
         } else {
-          // Stop immediately if seeding disabled
           stopTorrent(torrentFilename);
         }
 
         resolve(finalPath);
-      });
-
-      // Error handling
-      torrent.on('error', (err) => {
-        clearInterval(progressInterval);
-        zimLogger.download.error(`Torrent error: ${torrentFilename}`, { error: err.message });
+      } catch (err) {
+        zimLogger.download.error(`File verification failed: ${torrentFilename}`, {
+          error: err.message
+        });
 
         torrentInfo.status = 'error';
-        torrentInfo.error = err.message;
+        reject(new Error(`Download verification failed: ${err.message}`));
+      }
+    };
 
-        reject(err);
+    // CRITICAL: Use 'download' event for progress monitoring (more reliable than 'done')
+    torrent.on('download', (bytes) => {
+      downloadEventCount++;
+      downloadStarted = true;
+
+      // Update torrent info
+      if (torrentInfo) {
+        torrentInfo.downloaded = torrent.downloaded;
+        torrentInfo.total = torrent.length;
+        torrentInfo.progress = Math.round(torrent.progress * 100);
+        torrentInfo.downloadSpeed = torrent.downloadSpeed;
+        torrentInfo.uploadSpeed = torrent.uploadSpeed;
+        torrentInfo.numPeers = torrent.numPeers;
+      }
+
+      // Call progress callback
+      if (onProgress) {
+        onProgress({
+          progress: torrentInfo.progress,
+          downloaded: torrent.downloaded,
+          total: torrent.length,
+          downloadSpeed: torrent.downloadSpeed,
+          uploadSpeed: torrent.uploadSpeed,
+          numPeers: torrent.numPeers,
+          timeRemaining: torrent.timeRemaining,
+          filename: torrentFilename
+        });
+      }
+
+      // Log progress every 100 download events (reduces log spam)
+      if (downloadEventCount % 100 === 0) {
+        zimLogger.download.detail(`Download progress: ${torrentInfo.progress}%`, {
+          filename: torrentFilename,
+          downloaded: `${(torrent.downloaded / 1024 / 1024).toFixed(2)}MB`,
+          total: `${(torrent.length / 1024 / 1024).toFixed(2)}MB`,
+          speed: `${(torrent.downloadSpeed / 1024 / 1024).toFixed(2)}MB/s`
+        });
+      }
+    });
+
+    // Metadata ready - now we know the actual filename
+    torrent.on('ready', () => {
+      torrentFilename = torrent.files[0]?.name || filename;
+      finalPath = path.join(downloadPath, torrentFilename);
+      torrentInfo.filename = torrentFilename;
+      torrentInfo.infoHash = torrent.infoHash;
+      torrentInfo.status = 'downloading';
+
+      activeTorrents.set(torrentFilename, torrentInfo);
+
+      zimLogger.download.detail('Torrent metadata ready', {
+        filename: torrentFilename,
+        infoHash: torrent.infoHash,
+        files: torrent.files.length,
+        length: torrent.length
       });
 
-      // Warning events
-      torrent.on('warning', (err) => {
-        zimLogger.download.warn(`Torrent warning: ${torrentFilename}`, { warning: err.message });
+      // Start progress monitoring
+      progressInterval = setInterval(async () => {
+        const progress = Math.round(torrent.progress * 100);
+        const downloaded = torrent.downloaded;
+        const total = torrent.length;
+
+        // BYTE-BASED COMPLETION CHECK
+        // This is the most reliable way to detect completion
+        if (downloaded === total && total > 0) {
+          zimLogger.download.success(`Bytes match - download complete`, {
+            filename: torrentFilename,
+            downloaded,
+            total
+          });
+          clearInterval(progressInterval);
+          await handleCompletion();
+          return;
+        }
+
+        // Check if we're stuck (no new bytes for 10 intervals at high progress)
+        if (progress >= 95) {
+          if (!timeAtHighProgress) {
+            timeAtHighProgress = Date.now();
+          }
+
+          if (downloaded === lastDownloadedBytes) {
+            stuckCounter++;
+
+            if (stuckCounter >= 10 && progress >= 99) {
+              // 10 seconds stuck at 99%+, check if file is actually complete
+              if (fs.existsSync(finalPath)) {
+                try {
+                  const stats = fs.statSync(finalPath);
+                  const sizeDiff = Math.abs(stats.size - total);
+                  const tolerance = Math.max(65536, total * 0.001);
+
+                  if (sizeDiff <= tolerance) {
+                    zimLogger.download.warn(`Stuck at ${progress}% but file appears complete`, {
+                      filename: torrentFilename,
+                      fileSize: stats.size,
+                      expectedSize: total
+                    });
+                    clearInterval(progressInterval);
+                    await handleCompletion();
+                    return;
+                  }
+                } catch (err) {
+                  // File not ready
+                }
+              }
+            }
+
+            // After 60 seconds stuck, give up and fallback to HTTP
+            if (stuckCounter >= 60) {
+              clearInterval(progressInterval);
+              zimLogger.download.error(`Download stuck at ${progress}% for 60s`, {
+                filename: torrentFilename,
+                downloaded,
+                total
+              });
+              reject(new Error(`Torrent stuck at ${progress}% - falling back to HTTP`));
+              return;
+            }
+          } else {
+            stuckCounter = 0; // Reset if bytes are moving
+          }
+
+          lastDownloadedBytes = downloaded;
+        }
+
+        // Log status at milestones
+        if (progress === 99 || progress === 100) {
+          const secondsAtHighProgress = timeAtHighProgress ?
+            Math.floor((Date.now() - timeAtHighProgress) / 1000) : 0;
+
+          if (secondsAtHighProgress % 5 === 0) {
+            zimLogger.download.info(`At ${progress}% for ${secondsAtHighProgress}s`, {
+              filename: torrentFilename,
+              downloaded,
+              total,
+              bytesRemaining: total - downloaded,
+              downloadSpeed: `${(torrent.downloadSpeed / 1024 / 1024).toFixed(2)}MB/s`,
+              peers: torrent.numPeers,
+              stuckCounter
+            });
+          }
+        }
+      }, 1000); // Check every second
+    });
+
+    // 'done' event - use as backup but don't rely on it
+    torrent.on('done', async () => {
+      if (!manualCompletionTriggered) {
+        zimLogger.download.info(`'done' event fired`, { filename: torrentFilename });
+        await handleCompletion();
+      }
+    });
+
+    // Error handling
+    torrent.on('error', (err) => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+      }
+      zimLogger.download.error(`Torrent error: ${torrentFilename}`, {
+        error: err.message
+      });
+      torrentInfo.status = 'error';
+      reject(err);
+    });
+
+    // Warning events
+    torrent.on('warning', (err) => {
+      zimLogger.download.warn(`Torrent warning: ${torrentFilename}`, {
+        warning: err.message
       });
     });
+
+    // Timeout if no activity after 2 minutes
+    setTimeout(() => {
+      if (!downloadStarted) {
+        if (progressInterval) {
+          clearInterval(progressInterval);
+        }
+        zimLogger.download.error('Torrent download timeout - no data received', {
+          filename: torrentFilename
+        });
+        reject(new Error('Torrent download timeout - no peers or data'));
+      }
+    }, 120000);
   });
 }
 
@@ -248,18 +403,28 @@ export function getTorrentStatus(filename) {
   if (!torrentInfo) return null;
 
   const { torrent, ...info } = torrentInfo;
+
+  // Calculate seeding duration if applicable
+  let seedingDuration = null;
+  if (info.status === 'seeding' && info.seedingStartTime) {
+    seedingDuration = Math.round((Date.now() - info.seedingStartTime) / 1000);
+  }
+
   return {
     ...info,
+    seedingDuration,
     // Add live stats from torrent if still active
     ...(torrent && !torrent.destroyed ? {
       progress: Math.round(torrent.progress * 100),
       downloaded: torrent.downloaded,
+      uploaded: torrent.uploaded,
       total: torrent.length,
       downloadSpeed: torrent.downloadSpeed,
       uploadSpeed: torrent.uploadSpeed,
       numPeers: torrent.numPeers,
       timeRemaining: torrent.timeRemaining,
-      ratio: torrent.uploaded / torrent.downloaded || 0
+      ratio: torrent.uploaded / torrent.downloaded || 0,
+      isSeeding: info.status === 'seeding'
     } : {})
   };
 }

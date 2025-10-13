@@ -5,10 +5,13 @@ export default function AdminSystem() {
   const [updateSettings, setUpdateSettings] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [autoIndexEnabled, setAutoIndexEnabled] = useState(false);
+  const [torrentSettings, setTorrentSettings] = useState(null);
+  const [savingTorrentSettings, setSavingTorrentSettings] = useState(false);
 
   useEffect(() => {
     fetchUpdateSettings();
     fetchAutoIndexSetting();
+    fetchTorrentSettings();
   }, []);
 
   const fetchUpdateSettings = async () => {
@@ -127,6 +130,55 @@ export default function AdminSystem() {
     }
   };
 
+  const fetchTorrentSettings = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/torrent-settings', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setTorrentSettings(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch torrent settings:', err);
+    }
+  };
+
+  const handleTorrentSettingsChange = (field, value) => {
+    setTorrentSettings(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const handleSaveTorrentSettings = async () => {
+    setSavingTorrentSettings(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/zim/torrent-settings', {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(torrentSettings)
+      });
+
+      if (response.ok) {
+        alert('Torrent settings saved successfully!');
+      } else {
+        alert('Failed to save torrent settings');
+      }
+    } catch (err) {
+      console.error('Failed to save torrent settings:', err);
+      alert('Failed to save torrent settings: ' + err.message);
+    } finally {
+      setSavingTorrentSettings(false);
+    }
+  };
+
   const handleChangePassword = () => {
     const currentPassword = prompt('Enter current password:');
     if (!currentPassword) return;
@@ -212,6 +264,128 @@ export default function AdminSystem() {
             <span className="slider"></span>
           </label>
         </div>
+      </div>
+
+      <div className="card mb-3">
+        <h2 className="card-header">Torrent Download Settings</h2>
+        <p className="text-muted mb-3">
+          Configure how ZIM files are downloaded via BitTorrent. Torrent downloads are often faster
+          and more reliable than direct HTTP downloads.
+        </p>
+
+        {torrentSettings ? (
+          <div>
+            <div className="mb-3">
+              <label className="form-label">
+                <strong>Default Download Method:</strong>
+              </label>
+              <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="defaultMethod"
+                    value="torrent"
+                    checked={torrentSettings.defaultMethod === 'torrent'}
+                    onChange={(e) => handleTorrentSettingsChange('defaultMethod', e.target.value)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <span>Torrent (Recommended)</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="defaultMethod"
+                    value="http"
+                    checked={torrentSettings.defaultMethod === 'http'}
+                    onChange={(e) => handleTorrentSettingsChange('defaultMethod', e.target.value)}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <span>HTTP (Fallback)</span>
+                </label>
+              </div>
+              <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
+                Torrent downloads are faster and resume automatically. HTTP is used as fallback if torrents fail.
+              </p>
+            </div>
+
+            <div className="mb-3">
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={torrentSettings.seedEnabled || false}
+                  onChange={(e) => handleTorrentSettingsChange('seedEnabled', e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                <div>
+                  <strong>Enable seeding after download</strong>
+                  <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+                    Help others by uploading (seeding) files after downloading. This supports the community
+                    and improves download speeds for everyone.
+                  </p>
+                </div>
+              </label>
+            </div>
+
+            {torrentSettings.seedEnabled && (
+              <>
+                <div className="mb-3">
+                  <label className="form-label">
+                    <strong>Seed duration:</strong>
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <input
+                      type="number"
+                      min="-1"
+                      max="720"
+                      className="form-input"
+                      value={torrentSettings.seedDurationHours ?? 24}
+                      onChange={(e) => handleTorrentSettingsChange('seedDurationHours', parseInt(e.target.value))}
+                      style={{ width: '120px' }}
+                    />
+                    <span>hours (-1 for unlimited)</span>
+                  </div>
+                  <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
+                    How long to seed files after downloading. Set to -1 for unlimited seeding.
+                    Recommended: 24 hours.
+                  </p>
+                </div>
+
+                <div className="mb-3">
+                  <label className="form-label">
+                    <strong>Max upload speed:</strong>
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="100"
+                      step="0.1"
+                      className="form-input"
+                      value={((torrentSettings.maxUploadSpeed || 1048576) / 1024 / 1024).toFixed(1)}
+                      onChange={(e) => handleTorrentSettingsChange('maxUploadSpeed', Math.round(parseFloat(e.target.value) * 1024 * 1024))}
+                      style={{ width: '120px' }}
+                    />
+                    <span>MB/s (0 for unlimited)</span>
+                  </div>
+                  <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
+                    Limit upload speed to prevent saturating your internet connection.
+                    Default: 1 MB/s. Set to 0 for unlimited.
+                  </p>
+                </div>
+              </>
+            )}
+
+            <button
+              onClick={handleSaveTorrentSettings}
+              disabled={savingTorrentSettings}
+              className="btn btn-primary"
+            >
+              {savingTorrentSettings ? 'Saving...' : 'Save Torrent Settings'}
+            </button>
+          </div>
+        ) : (
+          <p>Loading settings...</p>
+        )}
       </div>
 
       <div className="card mb-3">

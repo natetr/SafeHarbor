@@ -164,6 +164,42 @@ export default function AdminZIM() {
     }
   };
 
+  const handleCancelDownload = async (filename, title) => {
+    const download = activeDownloads.find(d => d.filename === filename);
+    const isSeeding = download?.status === 'seeding';
+
+    const message = isSeeding
+      ? `Stop seeding "${title}"? This will stop uploading to other peers.`
+      : `Cancel download "${title}" and delete the partial file?`;
+
+    if (!confirm(message)) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/zim/download/cancel/${encodeURIComponent(filename)}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ deleteFile: !isSeeding }) // Don't delete completed files when stopping seeding
+      });
+
+      if (response.ok) {
+        // Immediately remove from active downloads for better UX
+        setActiveDownloads(prev => prev.filter(d => d.filename !== filename));
+        // Refresh download progress to get updated list
+        fetchDownloadProgress();
+      } else {
+        const data = await response.json();
+        alert(`Failed to ${isSeeding ? 'stop seeding' : 'cancel download'}: ${data.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error(`Failed to ${isSeeding ? 'stop seeding' : 'cancel download'}:`, err);
+      alert(`Failed to ${isSeeding ? 'stop seeding' : 'cancel download'}: ${err.message}`);
+    }
+  };
+
   const handleDownloadByUrl = async () => {
     if (!downloadUrl.trim()) {
       alert('Please enter a valid URL');
@@ -472,10 +508,13 @@ export default function AdminZIM() {
           <h2 className="card-header">Active Downloads ({activeDownloads.length})</h2>
           {activeDownloads.map(download => {
             const isTorrent = download.method === 'torrent';
+            const isSeeding = download.status === 'seeding';
             const downloadSpeed = download.downloadSpeed || 0;
             const uploadSpeed = download.uploadSpeed || 0;
             const numPeers = download.numPeers || 0;
             const timeRemaining = download.timeRemaining;
+            const seedingDuration = download.seedingDuration || 0;
+            const ratio = download.ratio || 0;
 
             // Format time remaining
             let etaText = '';
@@ -486,6 +525,18 @@ export default function AdminZIM() {
                 etaText = `${hours}h ${minutes}m`;
               } else {
                 etaText = `${minutes}m`;
+              }
+            }
+
+            // Format seeding duration
+            let seedingText = '';
+            if (isSeeding && seedingDuration > 0) {
+              const hours = Math.floor(seedingDuration / 3600);
+              const minutes = Math.floor((seedingDuration % 3600) / 60);
+              if (hours > 0) {
+                seedingText = `${hours}h ${minutes}m`;
+              } else {
+                seedingText = `${minutes}m`;
               }
             }
 
@@ -505,28 +556,58 @@ export default function AdminZIM() {
                     }}>
                       {isTorrent ? 'TORRENT' : 'HTTP'}
                     </span>
+                    {isSeeding && (
+                      <span style={{
+                        marginLeft: '0.5rem',
+                        padding: '2px 6px',
+                        borderRadius: '3px',
+                        fontSize: '0.7rem',
+                        fontWeight: 'bold',
+                        background: '#28a745',
+                        color: 'white'
+                      }}>
+                        SEEDING
+                      </span>
+                    )}
                   </div>
-                  <span>{download.progress}%</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span>{download.progress}%</span>
+                    <button
+                      onClick={() => handleCancelDownload(download.filename, download.title)}
+                      className="btn btn-danger"
+                      style={{ padding: '2px 8px', fontSize: '0.75rem' }}
+                      title={isSeeding ? 'Stop seeding' : 'Cancel download and delete file'}
+                    >
+                      {isSeeding ? 'Stop' : 'Cancel'}
+                    </button>
+                  </div>
                 </div>
-                <div style={{
-                  width: '100%',
-                  height: '8px',
-                  background: 'var(--bg)',
-                  borderRadius: '4px',
-                  overflow: 'hidden'
-                }}>
+                {!isSeeding && (
                   <div style={{
-                    width: `${download.progress}%`,
-                    height: '100%',
-                    background: 'var(--primary)',
-                    transition: 'width 0.3s ease'
-                  }} />
-                </div>
+                    width: '100%',
+                    height: '8px',
+                    background: 'var(--bg)',
+                    borderRadius: '4px',
+                    overflow: 'hidden'
+                  }}>
+                    <div style={{
+                      width: `${download.progress}%`,
+                      height: '100%',
+                      background: 'var(--primary)',
+                      transition: 'width 0.3s ease'
+                    }} />
+                  </div>
+                )}
                 <div className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.5rem' }}>
-                  <div>{formatSize(download.downloadedSize)} / {formatSize(download.totalSize)} • {download.status}</div>
-                  {isTorrent && downloadSpeed > 0 && (
+                  {!isSeeding && <div>{formatSize(download.downloadedSize)} / {formatSize(download.totalSize)} • {download.status}</div>}
+                  {isSeeding && (
+                    <div>
+                      Uploaded: {formatSize(download.uploaded || 0)} • Ratio: {ratio.toFixed(2)} • Duration: {seedingText}
+                    </div>
+                  )}
+                  {isTorrent && (downloadSpeed > 0 || uploadSpeed > 0) && (
                     <div style={{ marginTop: '0.25rem' }}>
-                      ↓ {(downloadSpeed / 1024 / 1024).toFixed(2)} MB/s
+                      {downloadSpeed > 0 && `↓ ${(downloadSpeed / 1024 / 1024).toFixed(2)} MB/s`}
                       {uploadSpeed > 0 && ` • ↑ ${(uploadSpeed / 1024 / 1024).toFixed(2)} MB/s`}
                       {numPeers > 0 && ` • ${numPeers} peer${numPeers !== 1 ? 's' : ''}`}
                       {etaText && ` • ETA: ${etaText}`}
