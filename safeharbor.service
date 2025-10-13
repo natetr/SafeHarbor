@@ -25,14 +25,14 @@ After=network.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 
-# User and Group (change 'nate' to your username)
-User=nate
-Group=nate
+# User and Group (default Raspberry Pi user is 'pi')
+User=pi
+Group=pi
 
 # Working directory (change to your installation path)
-WorkingDirectory=/home/nate/SafeHarbor
+WorkingDirectory=/home/pi/SafeHarbor
 
 # Start command (update path if Node.js is elsewhere)
 ExecStart=/usr/bin/node server/index.js
@@ -51,10 +51,6 @@ StartLimitIntervalSec=600
 
 # Don't restart if app exits with these codes (intentional shutdown)
 RestartPreventExitStatus=0 2
-
-# Watchdog - app must ping systemd every 60s or it will be restarted
-# This catches hung processes that don't crash but stop responding
-WatchdogSec=60
 
 # Graceful shutdown - give app 30s to clean up before SIGKILL
 TimeoutStopSec=30
@@ -79,7 +75,7 @@ PrivateTmp=true
 # Protect system directories
 ProtectSystem=strict
 # Allow writing to these directories
-ReadWritePaths=/home/nate/SafeHarbor /var/safeharbor /var/log/safeharbor /tmp
+ReadWritePaths=/home/pi/SafeHarbor /var/safeharbor /var/log/safeharbor /tmp
 
 # Protect home directory (except our working directory)
 ProtectHome=read-only
