@@ -47,6 +47,7 @@ export default function AdminLayout({ user, onLogout }) {
             <Link to="/admin/zim" className="navbar-link">ZIM Libraries</Link>
             <Link to="/admin/network" className="navbar-link">Network</Link>
             <Link to="/admin/system" className="navbar-link">System</Link>
+            <Link to="/admin/crash-logs" className="navbar-link">Crash Logs</Link>
             <Link to="/" className="navbar-link">Guest View</Link>
             <button onClick={onLogout} className="btn btn-sm btn-danger">Logout</button>
           </div>
@@ -59,6 +60,7 @@ export default function AdminLayout({ user, onLogout }) {
               <Link to="/admin/zim" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>ZIM Libraries</Link>
               <Link to="/admin/network" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Network</Link>
               <Link to="/admin/system" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>System</Link>
+              <Link to="/admin/crash-logs" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Crash Logs</Link>
               <Link to="/" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Guest View</Link>
               <button onClick={() => { onLogout(); setMobileMenuOpen(false); }} className="btn btn-sm btn-danger" style={{ width: '100%', margin: '0.5rem 1rem', maxWidth: 'calc(100% - 2rem)' }}>Logout</button>
             </div>

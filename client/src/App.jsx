@@ -15,6 +15,7 @@ import AdminZIMLogs from './pages/admin/ZIMLogs';
 import AdminZIMIndexing from './pages/admin/ZIMIndexing';
 import AdminNetwork from './pages/admin/Network';
 import AdminSystem from './pages/admin/System';
+import CrashLogs from './pages/admin/CrashLogs';
 import './App.css';
 
 function App() {
@@ -119,6 +120,7 @@ function App() {
           <Route path="zim/logs" element={<AdminZIMLogs />} />
           <Route path="network" element={<AdminNetwork />} />
           <Route path="system" element={<AdminSystem />} />
+          <Route path="crash-logs" element={<CrashLogs />} />
         </Route>
 
         {/* Catch all */}

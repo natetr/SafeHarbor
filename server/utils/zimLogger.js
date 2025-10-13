@@ -245,6 +245,28 @@ export const zimLogger = {
     success: (message, data = {}) => log(LOG_LEVELS.basic, 'kiwix', message, data, 'success'),
     warn: (message, data = {}) => log(LOG_LEVELS.basic, 'kiwix', message, data, 'warn'),
     error: (message, data = {}) => log(LOG_LEVELS.basic, 'kiwix', message, data, 'error'),
+
+    // Log kiwix-serve crashes to database
+    logCrash: async (options) => {
+      await logToDatabase('kiwix_crash', {
+        ...options,
+        status: 'failed',
+        errorMessage: options.errorMessage || `Kiwix crashed with exit code ${options.exitCode || 'unknown'}`
+      });
+      log(LOG_LEVELS.basic, 'kiwix', `Kiwix server crashed`, options, 'error');
+    },
+    logQuarantine: async (options) => {
+      await logToDatabase('zim_quarantined', { ...options, status: 'warning' });
+      log(LOG_LEVELS.basic, 'kiwix', `ZIM quarantined: ${options.zimTitle || options.zimFilename}`, options, 'warn');
+    },
+    logRestart: async (options) => {
+      await logToDatabase('kiwix_restart', { ...options, status: 'info' });
+      log(LOG_LEVELS.basic, 'kiwix', `Kiwix server restarting`, options, 'info');
+    },
+    logStartFailure: async (options) => {
+      await logToDatabase('kiwix_start_failed', { ...options, status: 'failed' });
+      log(LOG_LEVELS.basic, 'kiwix', `Kiwix server failed to start`, options, 'error');
+    }
   },
 
   // Catalog query operations
@@ -316,6 +338,59 @@ export const zimLogger = {
     success: (message, data = {}) => log(LOG_LEVELS.detailed, 'file', message, data, 'success'),
     warn: (message, data = {}) => log(LOG_LEVELS.basic, 'file', message, data, 'warn'),
     error: (message, data = {}) => log(LOG_LEVELS.basic, 'file', message, data, 'error'),
+  },
+
+  // Indexing operations
+  indexing: {
+    info: (message, data = {}) => log(LOG_LEVELS.basic, 'indexing', message, data, 'info'),
+    detail: (message, data = {}) => log(LOG_LEVELS.detailed, 'indexing', message, data, 'info'),
+    verbose: (message, data = {}) => log(LOG_LEVELS.verbose, 'indexing', message, data, 'info'),
+    success: (message, data = {}) => log(LOG_LEVELS.basic, 'indexing', message, data, 'success'),
+    warn: (message, data = {}) => log(LOG_LEVELS.basic, 'indexing', message, data, 'warn'),
+    error: (message, data = {}) => log(LOG_LEVELS.basic, 'indexing', message, data, 'error'),
+
+    // Log indexing events to database
+    logStart: async (options) => {
+      await logToDatabase('indexing_started', { ...options, status: 'in_progress' });
+      log(LOG_LEVELS.basic, 'indexing', `Indexing started: ${options.zimTitle || options.zimFilename}`, options, 'info');
+    },
+    logComplete: async (options) => {
+      await logToDatabase('indexing_completed', { ...options, status: 'success' });
+      log(LOG_LEVELS.basic, 'indexing', `Indexing completed: ${options.zimTitle || options.zimFilename}`, options, 'success');
+    },
+    logFailed: async (options) => {
+      await logToDatabase('indexing_failed', { ...options, status: 'failed' });
+      log(LOG_LEVELS.basic, 'indexing', `Indexing failed: ${options.zimTitle || options.zimFilename}`, options, 'error');
+    },
+    logDiscoveryFailed: async (options) => {
+      await logToDatabase('indexing_discovery_failed', { ...options, status: 'failed' });
+      log(LOG_LEVELS.basic, 'indexing', `Article discovery failed: ${options.zimTitle || options.zimFilename}`, options, 'error');
+    },
+    logArticleError: async (options) => {
+      await logToDatabase('indexing_article_error', { ...options, status: 'warning' });
+      log(LOG_LEVELS.basic, 'indexing', `Article indexing error: ${options.articleUrl}`, options, 'warn');
+    }
+  },
+
+  // Health monitoring operations
+  health: {
+    info: (message, data = {}) => log(LOG_LEVELS.basic, 'health', message, data, 'info'),
+    warn: (message, data = {}) => log(LOG_LEVELS.basic, 'health', message, data, 'warn'),
+    error: (message, data = {}) => log(LOG_LEVELS.basic, 'health', message, data, 'error'),
+
+    // Log health issues to database
+    logIssue: async (options) => {
+      await logToDatabase('health_issue', { ...options, status: 'warning' });
+      log(LOG_LEVELS.basic, 'health', `Health issue detected: ${options.issueType}`, options, 'warn');
+    },
+    logCritical: async (options) => {
+      await logToDatabase('health_critical', { ...options, status: 'failed' });
+      log(LOG_LEVELS.basic, 'health', `Critical health issue: ${options.issueType}`, options, 'error');
+    },
+    logRecovery: async (options) => {
+      await logToDatabase('health_recovery', { ...options, status: 'info' });
+      log(LOG_LEVELS.basic, 'health', `Recovery action taken: ${options.action}`, options, 'info');
+    }
   }
 };
 

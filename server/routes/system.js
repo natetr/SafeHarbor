@@ -283,4 +283,113 @@ router.put('/settings', authenticateToken, requireAdmin, (req, res) => {
   }
 });
 
+// Get crash logs
+router.get('/crash-logs', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const crashLogsDir = path.join(process.env.DATA_DIR || './data', 'crash-logs');
+
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(crashLogsDir)) {
+      fs.mkdirSync(crashLogsDir, { recursive: true });
+      return res.json([]);
+    }
+
+    // Read all crash log files
+    const files = fs.readdirSync(crashLogsDir)
+      .filter(f => f.endsWith('.json'))
+      .sort()
+      .reverse(); // Most recent first
+
+    const crashLogs = files.map(filename => {
+      try {
+        const filepath = path.join(crashLogsDir, filename);
+        const content = fs.readFileSync(filepath, 'utf8');
+        const log = JSON.parse(content);
+
+        // Add file info
+        const stats = fs.statSync(filepath);
+        return {
+          ...log,
+          filename,
+          size: stats.size,
+          modified: stats.mtime
+        };
+      } catch (err) {
+        console.error(`Error reading crash log ${filename}:`, err);
+        return null;
+      }
+    }).filter(log => log !== null);
+
+    res.json(crashLogs);
+  } catch (err) {
+    console.error('Error fetching crash logs:', err);
+    res.status(500).json({ error: 'Failed to fetch crash logs' });
+  }
+});
+
+// Get specific crash log
+router.get('/crash-logs/:id', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params;
+    const crashLogsDir = path.join(process.env.DATA_DIR || './data', 'crash-logs');
+    const filename = `crash-${id}.json`;
+    const filepath = path.join(crashLogsDir, filename);
+
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ error: 'Crash log not found' });
+    }
+
+    const content = fs.readFileSync(filepath, 'utf8');
+    const log = JSON.parse(content);
+
+    res.json(log);
+  } catch (err) {
+    console.error('Error fetching crash log:', err);
+    res.status(500).json({ error: 'Failed to fetch crash log' });
+  }
+});
+
+// Delete crash log
+router.delete('/crash-logs/:id', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params;
+    const crashLogsDir = path.join(process.env.DATA_DIR || './data', 'crash-logs');
+    const filename = `crash-${id}.json`;
+    const filepath = path.join(crashLogsDir, filename);
+
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ error: 'Crash log not found' });
+    }
+
+    fs.unlinkSync(filepath);
+    res.json({ message: 'Crash log deleted successfully' });
+  } catch (err) {
+    console.error('Error deleting crash log:', err);
+    res.status(500).json({ error: 'Failed to delete crash log' });
+  }
+});
+
+// Delete all crash logs
+router.delete('/crash-logs', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    const crashLogsDir = path.join(process.env.DATA_DIR || './data', 'crash-logs');
+
+    if (!fs.existsSync(crashLogsDir)) {
+      return res.json({ message: 'No crash logs to delete', deleted: 0 });
+    }
+
+    const files = fs.readdirSync(crashLogsDir)
+      .filter(f => f.endsWith('.json'));
+
+    files.forEach(file => {
+      fs.unlinkSync(path.join(crashLogsDir, file));
+    });
+
+    res.json({ message: `Deleted ${files.length} crash log(s)`, deleted: files.length });
+  } catch (err) {
+    console.error('Error deleting crash logs:', err);
+    res.status(500).json({ error: 'Failed to delete crash logs' });
+  }
+});
+
 export default router;

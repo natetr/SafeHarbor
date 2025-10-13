@@ -1,15 +1,17 @@
 {
   "name": "safeharbor",
-  "version": "1.5.20",
+  "version": "1.5.21",
   "description": "Offline knowledge and media hub for Raspberry Pi",
   "main": "server/index.js",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "dev:clean": "bash scripts/clean-start.sh && npm run dev",
     "server:dev": "nodemon server/index.js",
     "client:dev": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "node server/index.js",
+    "start:clean": "bash scripts/clean-start.sh && npm start",
     "install-all": "npm install && cd client && npm install"
   },
   "keywords": [
