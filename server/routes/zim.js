@@ -4,7 +4,7 @@ import path from 'path';
 import axios from 'axios';
 import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/auth.js';
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import si from 'systeminformation';
 import { zimLogger, startOperation, endOperation } from '../utils/zimLogger.js';
@@ -96,8 +96,97 @@ async function logZimActivity(action, options = {}) {
   }
 }
 
+// Helper function to kill any existing kiwix-serve processes on the target port
+// This prevents "port already in use" errors when the app restarts after a crash
+function killExistingKiwixProcesses() {
+  try {
+    zimLogger.kiwix.detail('Checking for orphaned kiwix-serve processes', { port: KIWIX_PORT });
+
+    let pids = [];
+
+    // Try to find processes using the Kiwix port
+    // Use platform-appropriate commands
+    try {
+      // Try lsof first (works on most Unix-like systems including Linux/macOS/Raspberry Pi)
+      const output = execSync(`lsof -ti:${KIWIX_PORT}`, { encoding: 'utf8' }).trim();
+      if (output) {
+        pids = output.split('\n').map(pid => parseInt(pid.trim())).filter(pid => !isNaN(pid));
+      }
+    } catch (lsofError) {
+      // lsof might not be available or no processes found
+      // Try fuser as fallback (common on Linux/Raspberry Pi)
+      try {
+        const output = execSync(`fuser ${KIWIX_PORT}/tcp 2>/dev/null`, { encoding: 'utf8' }).trim();
+        if (output) {
+          pids = output.split(/\s+/).map(pid => parseInt(pid.trim())).filter(pid => !isNaN(pid));
+        }
+      } catch (fuserError) {
+        // Neither command worked or no processes found - that's fine
+        zimLogger.kiwix.verbose('No orphaned kiwix-serve processes found');
+        return;
+      }
+    }
+
+    if (pids.length === 0) {
+      zimLogger.kiwix.verbose('No orphaned kiwix-serve processes found');
+      return;
+    }
+
+    zimLogger.kiwix.warn(`Found ${pids.length} orphaned process(es) on port ${KIWIX_PORT}`, { pids });
+
+    // Kill each process
+    for (const pid of pids) {
+      try {
+        zimLogger.kiwix.info(`Killing orphaned process`, { pid, port: KIWIX_PORT });
+        process.kill(pid, 'SIGTERM');
+
+        // Give it a moment to terminate gracefully
+        const startTime = Date.now();
+        while (Date.now() - startTime < 1000) {
+          try {
+            process.kill(pid, 0); // Check if process still exists
+          } catch (e) {
+            // Process is gone - good!
+            zimLogger.kiwix.success('Process terminated successfully', { pid });
+            break;
+          }
+        }
+
+        // If still running, force kill
+        try {
+          process.kill(pid, 0);
+          zimLogger.kiwix.warn('Process still running, force killing', { pid });
+          process.kill(pid, 'SIGKILL');
+        } catch (e) {
+          // Already dead
+        }
+      } catch (killError) {
+        // Process might already be gone or we don't have permission
+        zimLogger.kiwix.detail('Could not kill process (may already be terminated)', {
+          pid,
+          error: killError.message
+        });
+      }
+    }
+
+    zimLogger.kiwix.success('Cleaned up orphaned kiwix-serve processes', {
+      killedCount: pids.length
+    });
+
+  } catch (err) {
+    // Log but don't fail - this is a best-effort cleanup
+    zimLogger.kiwix.warn('Error during orphaned process cleanup', {
+      error: err.message,
+      note: 'Continuing with startup anyway'
+    });
+  }
+}
+
 // Start Kiwix server
 async function startKiwixServer() {
+  // First, kill any orphaned kiwix-serve processes from previous runs
+  killExistingKiwixProcesses();
+
   if (kiwixProcess) {
     zimLogger.kiwix.verbose('Kiwix server already running - skipping start');
     return;
