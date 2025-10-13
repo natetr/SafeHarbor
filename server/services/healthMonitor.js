@@ -267,10 +267,10 @@ async function performHealthCheck(restartKiwixCallback) {
     try {
       console.log('🧹 Attempting final cleanup of stuck indexing jobs...');
       const stuckJobs = db.prepare(`
-        SELECT zim_id, zim_libraries.title, zim_libraries.filename
+        SELECT zim_indexing_status.zim_id, zim_libraries.title, zim_libraries.filename
         FROM zim_indexing_status
         LEFT JOIN zim_libraries ON zim_indexing_status.zim_id = zim_libraries.id
-        WHERE status = 'indexing'
+        WHERE zim_indexing_status.status = 'indexing'
       `).all();
 
       if (stuckJobs.length > 0) {
@@ -284,7 +284,7 @@ async function performHealthCheck(restartKiwixCallback) {
           UPDATE zim_indexing_status
           SET status = 'failed',
               error_message = 'Indexing interrupted by application crash/restart'
-          WHERE status = 'indexing'
+          WHERE zim_indexing_status.status = 'indexing'
         `).run();
 
         console.log('   ✓ Reset stuck indexing jobs to failed state');
