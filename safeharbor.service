@@ -79,7 +79,7 @@ PrivateTmp=true
 # Protect system directories
 ProtectSystem=strict
 # Allow writing to these directories
-ReadWritePaths=/home/nate/SafeHarbor /tmp
+ReadWritePaths=/home/nate/SafeHarbor /var/safeharbor /var/log/safeharbor /tmp
 
 # Protect home directory (except our working directory)
 ProtectHome=read-only
