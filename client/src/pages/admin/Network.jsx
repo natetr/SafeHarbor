@@ -195,6 +195,20 @@ export default function AdminNetwork() {
             />
           </div>
           <div className="form-group">
+            <label className="form-label">Hotspot Domain Name</label>
+            <input
+              type="text"
+              className="form-input"
+              value={config.hotspot_domain || 'safeharbor.local'}
+              onChange={(e) => handleConfigChange('hotspot_domain', e.target.value)}
+              placeholder="safeharbor.local"
+            />
+            <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+              The domain name users can type in their browser to access SafeHarbor.
+              Examples: safeharbor.local, safeharbor.com, library.local
+            </p>
+          </div>
+          <div className="form-group">
             <label className="form-label">Landing Page URL</label>
             <input
               type="text"

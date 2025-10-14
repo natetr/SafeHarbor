@@ -40,6 +40,7 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
       hotspot_ssid,
       hotspot_password,
       hotspot_open,
+      hotspot_domain,
       connection_limit,
       home_network_ssid,
       home_network_password,
@@ -64,6 +65,7 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
       if (hotspot_ssid !== undefined) { updates.push('hotspot_ssid = ?'); params.push(hotspot_ssid); }
       if (hotspot_password !== undefined) { updates.push('hotspot_password = ?'); params.push(hotspot_password); }
       if (hotspot_open !== undefined) { updates.push('hotspot_open = ?'); params.push(hotspot_open ? 1 : 0); }
+      if (hotspot_domain !== undefined) { updates.push('hotspot_domain = ?'); params.push(hotspot_domain); }
       if (connection_limit !== undefined) { updates.push('connection_limit = ?'); params.push(connection_limit); }
       if (home_network_ssid !== undefined) { updates.push('home_network_ssid = ?'); params.push(home_network_ssid); }
       if (home_network_password !== undefined) { updates.push('home_network_password = ?'); params.push(home_network_password); }
@@ -78,13 +80,14 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
     } else {
       // Insert new config - CRITICAL: Use queued database write
       await safeDbRun(`
-        INSERT INTO network_config (mode, hotspot_ssid, hotspot_password, hotspot_open, connection_limit, home_network_ssid, home_network_password, captive_portal, landing_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO network_config (mode, hotspot_ssid, hotspot_password, hotspot_open, hotspot_domain, connection_limit, home_network_ssid, home_network_password, captive_portal, landing_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         mode || 'hotspot',
         hotspot_ssid || 'SafeHarbor',
         hotspot_password || 'safeharbor2024',
         hotspot_open ? 1 : 0,
+        hotspot_domain || 'safeharbor.local',
         connection_limit || 10,
         home_network_ssid || null,
         home_network_password || null,
@@ -225,11 +228,12 @@ max_num_sta=${config.connection_limit || 10}
   fs.writeFileSync('/tmp/hostapd.conf', hostapdConf);
 
   // Create dnsmasq configuration
+  const hotspotDomain = config.hotspot_domain || 'safeharbor.local';
   const dnsmasqConf = `
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
-address=/safeharbor.local/192.168.4.1
+address=/${hotspotDomain}/192.168.4.1
 `;
 
   fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
