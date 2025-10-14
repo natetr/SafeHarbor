@@ -103,7 +103,7 @@ const authRoutes = (await import('./routes/auth.js')).default;
 const contentRoutes = (await import('./routes/content.js')).default;
 const zimModule = await import('./routes/zim.js');
 const zimRoutes = zimModule.default;
-const { startKiwixServer } = zimModule;
+const { startKiwixServer, cleanupOrphanedZims } = zimModule;
 const networkRoutes = (await import('./routes/network.js')).default;
 const systemRoutes = (await import('./routes/system.js')).default;
 const searchRoutes = (await import('./routes/search.js')).default;
@@ -149,8 +149,12 @@ try {
   console.error('   ✗ Failed to cleanup stuck indexing jobs:', err.message);
 }
 
-// Start Kiwix server after database is ready
-setTimeout(() => {
+// Cleanup orphaned ZIM files and start Kiwix server after database is ready
+setTimeout(async () => {
+  // Clean up orphaned ZIM files before starting Kiwix
+  await cleanupOrphanedZims();
+
+  // Start Kiwix server
   startKiwixServer();
   // Start the update scheduler (pass restartKiwixServer callback from zim routes)
   startUpdateScheduler(() => {

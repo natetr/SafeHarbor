@@ -681,6 +681,248 @@ function restartKiwixServer() {
   scheduleKiwixRestart('manual restart');
 }
 
+/**
+ * Validate a ZIM file and extract its metadata using kiwix-serve
+ * @param {string} filepath - Path to the ZIM file
+ * @returns {Promise<{valid: boolean, metadata?: object, error?: string}>}
+ */
+async function validateZimFile(filepath) {
+  return new Promise((resolve) => {
+    const validationPort = 19999; // Use a different port for validation
+    const validationProcess = spawn(KIWIX_SERVE_PATH, [
+      '--port', validationPort.toString(),
+      filepath
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+    let resolved = false;
+    let metadataFetched = false;
+
+    // Give kiwix-serve time to start, then fetch metadata
+    const metadataTimeout = setTimeout(async () => {
+      if (!resolved && !metadataFetched) {
+        metadataFetched = true;
+        try {
+          // Wait a bit for kiwix-serve to be ready
+          await new Promise(r => setTimeout(r, 500));
+
+          // Try to fetch metadata from the catalog endpoint
+          const catalogResponse = await axios.get(`http://localhost:${validationPort}/catalog/v2/entries`, {
+            timeout: 3000
+          });
+
+          const xml = catalogResponse.data;
+          const metadata = {};
+
+          // Parse the XML to extract metadata
+          const titleMatch = xml.match(/<title>(.*?)<\/title>/);
+          const descMatch = xml.match(/<summary>(.*?)<\/summary>/);
+          const langMatch = xml.match(/<language>(.*?)<\/language>/);
+          const articleCountMatch = xml.match(/<articleCount>(\d+)<\/articleCount>/);
+          const mediaCountMatch = xml.match(/<mediaCount>(\d+)<\/mediaCount>/);
+          const updatedMatch = xml.match(/<updated>(.*?)<\/updated>/);
+
+          // Extract icon URL from <link rel="http://opds-spec.org/image..." href="...">
+          const iconMatch = xml.match(/<link[^>]*rel="http:\/\/opds-spec\.org\/image[^"]*"[^>]*href="([^"]*)"/);
+
+          // Extract content path for building URLs later
+          const contentMatch = xml.match(/<link[^>]*type="text\/html"[^>]*href="([^"]*)"/);
+
+          if (titleMatch) metadata.title = titleMatch[1];
+          if (descMatch) metadata.description = descMatch[1];
+          if (langMatch) metadata.language = langMatch[1];
+          if (articleCountMatch) metadata.articleCount = parseInt(articleCountMatch[1]);
+          if (mediaCountMatch) metadata.mediaCount = parseInt(mediaCountMatch[1]);
+          if (updatedMatch) metadata.updated = updatedMatch[1];
+          if (iconMatch) metadata.icon = iconMatch[1];
+          if (contentMatch) metadata.contentPath = contentMatch[1];
+
+          resolved = true;
+          validationProcess.kill();
+          resolve({ valid: true, metadata });
+        } catch (err) {
+          // If metadata fetch fails, file is still valid, just without metadata
+          console.log(`   ⚠️  Could not fetch metadata: ${err.message}`);
+          resolved = true;
+          validationProcess.kill();
+          resolve({ valid: true, metadata: { validated: true } });
+        }
+      }
+    }, 1500);
+
+    validationProcess.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    validationProcess.stderr.on('data', (data) => {
+      stderr += data.toString();
+      // Check for known error patterns
+      if (stderr.includes('Invalid magic') ||
+          stderr.includes('Unable to open') ||
+          stderr.includes('Cannot read') ||
+          stderr.includes('corrupted') ||
+          stderr.includes('not a valid ZIM file')) {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(metadataTimeout);
+          validationProcess.kill();
+          resolve({ valid: false, error: 'Invalid or corrupted ZIM file' });
+        }
+      }
+    });
+
+    validationProcess.on('exit', (code) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(metadataTimeout);
+        // Non-zero exit within timeout usually means invalid file
+        if (code !== 0 && code !== null) {
+          resolve({ valid: false, error: `kiwix-serve exited with code ${code}` });
+        } else {
+          resolve({ valid: true, metadata: { validated: true } });
+        }
+      }
+    });
+
+    validationProcess.on('error', (err) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(metadataTimeout);
+        resolve({ valid: false, error: `Failed to validate: ${err.message}` });
+      }
+    });
+  });
+}
+
+/**
+ * Clean up orphaned ZIM files on startup
+ * - Scans ZIM directory for .zim files
+ * - Checks if each file exists in the database
+ * - Validates orphaned files and either adds them or deletes them
+ */
+async function cleanupOrphanedZims() {
+  console.log('🧹 Checking for orphaned ZIM files...');
+
+  try {
+    // Ensure ZIM directory exists
+    if (!fs.existsSync(ZIM_DIR)) {
+      console.log('   ✓ ZIM directory does not exist, skipping orphan cleanup');
+      return;
+    }
+
+    // Read all .zim files from directory
+    const filesInDir = fs.readdirSync(ZIM_DIR)
+      .filter(f => f.toLowerCase().endsWith('.zim'))
+      .map(f => ({
+        filename: f,
+        filepath: path.join(ZIM_DIR, f),
+        size: fs.statSync(path.join(ZIM_DIR, f)).size
+      }));
+
+    if (filesInDir.length === 0) {
+      console.log('   ✓ No ZIM files found in directory');
+      return;
+    }
+
+    console.log(`   Found ${filesInDir.length} ZIM file(s) in directory`);
+
+    // Get all ZIM filenames from database
+    const dbZims = await safeDbAll('SELECT filename, filepath FROM zim_libraries', []);
+    const dbFilenames = new Set(dbZims.map(z => z.filename));
+
+    // Find orphaned files (in directory but not in database)
+    const orphanedFiles = filesInDir.filter(f => !dbFilenames.has(f.filename));
+
+    if (orphanedFiles.length === 0) {
+      console.log('   ✓ No orphaned ZIM files found');
+      return;
+    }
+
+    console.log(`   ⚠️  Found ${orphanedFiles.length} orphaned ZIM file(s):`);
+    orphanedFiles.forEach(f => {
+      console.log(`      - ${f.filename} (${(f.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+    });
+
+    // Process each orphaned file
+    for (const orphan of orphanedFiles) {
+      console.log(`\n   🔍 Validating: ${orphan.filename}`);
+
+      const validation = await validateZimFile(orphan.filepath);
+
+      if (validation.valid) {
+        const metadata = validation.metadata || {};
+        const hasMetadata = metadata.title || metadata.language || metadata.articleCount;
+
+        if (hasMetadata) {
+          console.log(`      ✅ Valid ZIM file with metadata - adding to database`);
+          console.log(`         Title: ${metadata.title || 'N/A'}`);
+          console.log(`         Language: ${metadata.language || 'N/A'}`);
+          console.log(`         Articles: ${metadata.articleCount?.toLocaleString() || 'N/A'}`);
+        } else {
+          console.log(`      ✅ Valid ZIM file - adding to database (without metadata)`);
+        }
+
+        try {
+          // Add to database with extracted metadata (if available)
+          const result = await safeDbRun(`
+            INSERT INTO zim_libraries (filename, filepath, title, description, language, size, article_count, media_count, updated_date, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+          `, [
+            orphan.filename,
+            orphan.filepath,
+            metadata.title || orphan.filename.replace('.zim', '').replace(/_/g, ' '),
+            metadata.description || null,
+            metadata.language || null,
+            orphan.size,
+            metadata.articleCount || null,
+            metadata.mediaCount || null,
+            metadata.updated || null
+          ]);
+
+          const insertId = result.lastID || result.lastInsertRowid;
+          console.log(`      ✅ Added to database with ID: ${insertId}`);
+
+          // Log the activity
+          await logZimActivity('zim_discovered', {
+            zimTitle: metadata.title || orphan.filename.replace('.zim', ''),
+            zimFilename: orphan.filename,
+            zimId: insertId,
+            details: `Orphaned ZIM file discovered and validated on startup${hasMetadata ? ' with full metadata' : ''}`,
+            status: 'success',
+            fileSize: orphan.size
+          });
+        } catch (err) {
+          console.error(`      ❌ Failed to add to database: ${err.message}`);
+        }
+      } else {
+        console.log(`      ❌ Invalid ZIM file: ${validation.error}`);
+        console.log(`      🗑️  Deleting invalid file...`);
+
+        try {
+          fs.unlinkSync(orphan.filepath);
+          console.log(`      ✅ Deleted: ${orphan.filename}`);
+
+          // Log the deletion
+          await logZimActivity('zim_deleted_invalid', {
+            zimTitle: orphan.filename.replace('.zim', ''),
+            zimFilename: orphan.filename,
+            details: `Invalid orphaned ZIM file deleted on startup: ${validation.error}`,
+            status: 'success',
+            fileSize: orphan.size
+          });
+        } catch (err) {
+          console.error(`      ❌ Failed to delete invalid file: ${err.message}`);
+        }
+      }
+    }
+
+    console.log('\n✓ Orphaned ZIM cleanup complete\n');
+  } catch (err) {
+    console.error('   ❌ Failed to cleanup orphaned ZIMs:', err.message);
+  }
+}
+
 // Get all ZIM libraries
 router.get('/', optionalAuth, async (req, res) => {
   try {
@@ -2890,7 +3132,7 @@ router.put('/settings/auto-index', authenticateToken, requireAdmin, async (req, 
   }
 });
 
-// Export startKiwixServer and restartKiwixServer so they can be called after DB init
-export { startKiwixServer, restartKiwixServer };
+// Export startKiwixServer, restartKiwixServer and cleanupOrphanedZims so they can be called after DB init
+export { startKiwixServer, restartKiwixServer, cleanupOrphanedZims };
 
 export default router;
