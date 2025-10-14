@@ -202,6 +202,50 @@ router.get('/status', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Helper function to configure Avahi hostname for custom domain broadcasting
+async function configureAvahiHostname(domain) {
+  try {
+    // Extract hostname from domain (remove .local if present)
+    const hostname = domain.replace(/\.local$/, '');
+
+    console.log(`Configuring Avahi to broadcast: ${hostname}.local`);
+
+    // Update system hostname
+    await execAsync(`sudo hostnamectl set-hostname ${hostname}`);
+
+    // Update /etc/hosts
+    try {
+      const hostsContent = fs.readFileSync('/etc/hosts', 'utf8');
+      const lines = hostsContent.split('\n');
+      const updatedLines = lines.map(line => {
+        // Update the 127.0.1.1 line to use the new hostname
+        if (line.match(/^127\.0\.1\.1\s+/)) {
+          return `127.0.1.1\t${hostname} ${hostname}.local`;
+        }
+        return line;
+      });
+
+      // Write updated hosts file
+      fs.writeFileSync('/tmp/hosts.tmp', updatedLines.join('\n'));
+      await execAsync('sudo cp /tmp/hosts.tmp /etc/hosts');
+      await execAsync('sudo rm /tmp/hosts.tmp');
+    } catch (err) {
+      console.warn('Failed to update /etc/hosts:', err.message);
+    }
+
+    // Restart Avahi to broadcast the new hostname
+    try {
+      await execAsync('sudo systemctl restart avahi-daemon');
+      console.log(`✓ Avahi configured to broadcast ${hostname}.local`);
+    } catch (err) {
+      console.warn('Avahi not available, mDNS may not work:', err.message);
+    }
+  } catch (err) {
+    console.error('Failed to configure Avahi hostname:', err.message);
+    // Don't throw - this is a nice-to-have feature
+  }
+}
+
 // Helper function to apply hotspot configuration
 async function applyHotspotConfig(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
@@ -227,13 +271,42 @@ max_num_sta=${config.connection_limit || 10}
 
   fs.writeFileSync('/tmp/hostapd.conf', hostapdConf);
 
-  // Create dnsmasq configuration
+  // Create dnsmasq configuration with captive portal DNS hijacking
   const hotspotDomain = config.hotspot_domain || 'safeharbor.local';
   const dnsmasqConf = `
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
+
+# Main domain resolution
 address=/${hotspotDomain}/192.168.4.1
+
+# Captive Portal DNS Hijacking
+# Redirect all captive portal detection URLs to trigger the captive portal
+
+# Apple devices (iOS, macOS)
+address=/captive.apple.com/192.168.4.1
+address=/apple.com/192.168.4.1
+
+# Android/Google devices
+address=/connectivitycheck.gstatic.com/192.168.4.1
+address=/clients3.google.com/192.168.4.1
+address=/www.google.com/192.168.4.1
+address=/play.googleapis.com/192.168.4.1
+
+# Microsoft Windows
+address=/www.msftconnecttest.com/192.168.4.1
+address=/www.msftncsi.com/192.168.4.1
+address=/ipv6.msftconnecttest.com/192.168.4.1
+
+# Firefox
+address=/detectportal.firefox.com/192.168.4.1
+
+# Ubuntu/Linux
+address=/connectivity-check.ubuntu.com/192.168.4.1
+
+# Catch-all for all other domains (forces captive portal detection)
+address=/#/192.168.4.1
 `;
 
   fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
@@ -258,6 +331,10 @@ address=/${hotspotDomain}/192.168.4.1
   await execAsync('sudo killall dnsmasq || true');
   await execAsync('sudo dnsmasq -C /tmp/dnsmasq.conf');
 
+  // Configure Avahi to broadcast the custom domain name
+  // This allows the user-defined domain to work via mDNS
+  await configureAvahiHostname(config.hotspot_domain || 'safeharbor.local');
+
   // Enable IP forwarding and NAT (if eth0 exists)
   try {
     await execAsync('echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward');
@@ -269,9 +346,13 @@ address=/${hotspotDomain}/192.168.4.1
   }
 }
 
-// Helper function to apply home network configuration
+// Helper function to apply home network configuration with automatic fallback
 async function applyHomeNetworkConfig(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
+  const CONNECTION_TIMEOUT = 30000; // 30 seconds to establish connection
+  const VALIDATION_TIMEOUT = 15000; // 15 seconds to validate connection
+
+  console.log(`Attempting to connect to home network: ${config.home_network_ssid}`);
 
   // Stop hotspot services
   try {
@@ -303,13 +384,94 @@ network={
 
   fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
 
-  // Connect to network
-  await execAsync(`sudo ip link set ${INTERFACE} up`);
-  await execAsync(`sudo killall wpa_supplicant || true`);
-  await execAsync(`sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf`);
-  await execAsync(`sudo dhclient ${INTERFACE}`);
+  try {
+    // Connect to network
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
+    await execAsync(`sudo killall wpa_supplicant || true`);
 
-  console.log('Connected to home network');
+    // Start wpa_supplicant
+    await execAsync(`sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf`);
+
+    // Wait for connection to establish
+    console.log('Waiting for Wi-Fi authentication...');
+    let connected = false;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < CONNECTION_TIMEOUT) {
+      try {
+        const { stdout } = await execAsync(`sudo wpa_cli -i ${INTERFACE} status`);
+        if (stdout.includes('wpa_state=COMPLETED')) {
+          connected = true;
+          console.log('✓ Wi-Fi authentication successful');
+          break;
+        }
+      } catch (err) {
+        // wpa_cli might not be ready yet
+      }
+
+      // Wait 2 seconds before checking again
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    if (!connected) {
+      throw new Error('Failed to authenticate with Wi-Fi network (timeout)');
+    }
+
+    // Request IP address via DHCP
+    console.log('Requesting IP address...');
+    await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: VALIDATION_TIMEOUT });
+
+    // Validate connection by checking if we have an IP
+    const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
+    const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+
+    if (!ipMatch) {
+      throw new Error('Failed to obtain IP address from DHCP');
+    }
+
+    const assignedIP = ipMatch[1];
+    console.log(`✓ IP address assigned: ${assignedIP}`);
+
+    // Validate internet connectivity (optional but recommended)
+    try {
+      console.log('Testing network connectivity...');
+      await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
+      console.log('✓ Network connectivity verified');
+    } catch (err) {
+      console.warn('⚠️  No internet connectivity detected, but local network is accessible');
+    }
+
+    console.log(`✓ Successfully connected to home network: ${config.home_network_ssid}`);
+
+  } catch (err) {
+    console.error(`✗ Failed to connect to home network: ${err.message}`);
+    console.log('🔄 Falling back to hotspot mode...');
+
+    // Clean up failed connection attempt
+    try {
+      await execAsync('sudo killall wpa_supplicant || true');
+      await execAsync('sudo killall dhclient || true');
+      await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
+    } catch (cleanupErr) {
+      console.warn('Warning during cleanup:', cleanupErr.message);
+    }
+
+    // Update database to revert to hotspot mode
+    await safeDbRun(
+      'UPDATE network_config SET mode = ? WHERE id = (SELECT id FROM network_config ORDER BY id DESC LIMIT 1)',
+      ['hotspot']
+    );
+
+    // Apply hotspot configuration as fallback
+    await applyHotspotConfig(config);
+
+    throw new Error(
+      `Could not connect to home network "${config.home_network_ssid}". ` +
+      `This may be due to incorrect password, network not in range, or network configuration issues. ` +
+      `The system has automatically switched back to hotspot mode for access. ` +
+      `Please verify your network credentials and try again.`
+    );
+  }
 }
 
 export default router;

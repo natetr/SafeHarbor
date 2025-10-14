@@ -400,6 +400,15 @@ sudo journalctl -u safeharbor -n 50
 3. Ensure wlan0 is not being managed by NetworkManager
 4. Verify hostapd configuration: `cat /tmp/hostapd.conf`
 
+### Network Configuration Issues
+
+For detailed troubleshooting of network configuration issues including:
+- Captive portal not working
+- Hostname showing as `raspberrypi.local` instead of `safeharbor.local`
+- Home network connection failures
+
+See [NETWORK_TROUBLESHOOTING.md](NETWORK_TROUBLESHOOTING.md) for comprehensive solutions.
+
 ### ZIM files not loading
 
 1. Check Kiwix is running: `ps aux | grep kiwix`

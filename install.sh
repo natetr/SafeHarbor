@@ -33,7 +33,9 @@ apt-get install -y \
   wireless-tools \
   wpasupplicant \
   iptables \
-  lsof
+  lsof \
+  avahi-daemon \
+  avahi-utils
 
 # Install kiwix-tools with libzim 9.2.0+ (fixes macOS/large file mmap issues)
 echo "Installing kiwix-tools..."
@@ -100,6 +102,44 @@ systemctl stop hostapd || true
 systemctl stop dnsmasq || true
 systemctl disable hostapd || true
 systemctl disable dnsmasq || true
+
+# Configure hostname to safeharbor
+echo "Configuring hostname..."
+CURRENT_HOSTNAME=$(hostname)
+NEW_HOSTNAME="safeharbor"
+
+if [ "$CURRENT_HOSTNAME" != "$NEW_HOSTNAME" ]; then
+  echo "Changing hostname from $CURRENT_HOSTNAME to $NEW_HOSTNAME..."
+
+  # Set hostname
+  hostnamectl set-hostname $NEW_HOSTNAME
+
+  # Update /etc/hosts
+  sed -i "s/127.0.1.1.*$CURRENT_HOSTNAME/127.0.1.1\t$NEW_HOSTNAME/g" /etc/hosts
+
+  # Ensure safeharbor.local is in /etc/hosts
+  if ! grep -q "127.0.1.1.*$NEW_HOSTNAME" /etc/hosts; then
+    echo "127.0.1.1	$NEW_HOSTNAME $NEW_HOSTNAME.local" >> /etc/hosts
+  fi
+
+  echo "Hostname changed to $NEW_HOSTNAME"
+else
+  echo "Hostname already set to $NEW_HOSTNAME"
+fi
+
+# Configure and enable Avahi for mDNS (.local domain resolution)
+echo "Configuring Avahi daemon for mDNS..."
+systemctl enable avahi-daemon
+systemctl restart avahi-daemon
+
+# Verify Avahi is publishing the hostname
+sleep 2
+if systemctl is-active --quiet avahi-daemon; then
+  echo "✓ Avahi daemon is running"
+  echo "✓ Device will be accessible at: $NEW_HOSTNAME.local"
+else
+  echo "⚠️  Warning: Avahi daemon failed to start"
+fi
 
 # Create SafeHarbor user (if not exists)
 if ! id -u safeharbor > /dev/null 2>&1; then
@@ -248,6 +288,8 @@ safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/dnsmasq
 safeharbor ALL=(ALL) NOPASSWD: /sbin/ip
 safeharbor ALL=(ALL) NOPASSWD: /sbin/iptables
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_supplicant
+safeharbor ALL=(ALL) NOPASSWD: /sbin/wpa_cli
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_cli
 safeharbor ALL=(ALL) NOPASSWD: /sbin/dhclient
 safeharbor ALL=(ALL) NOPASSWD: /bin/systemctl
 safeharbor ALL=(ALL) NOPASSWD: /sbin/reboot
@@ -255,6 +297,8 @@ safeharbor ALL=(ALL) NOPASSWD: /sbin/shutdown
 safeharbor ALL=(ALL) NOPASSWD: /usr/bin/killall
 safeharbor ALL=(ALL) NOPASSWD: /bin/mount
 safeharbor ALL=(ALL) NOPASSWD: /bin/umount
+safeharbor ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl
+safeharbor ALL=(ALL) NOPASSWD: /bin/cp
 EOF
 
 chmod 440 /etc/sudoers.d/safeharbor
