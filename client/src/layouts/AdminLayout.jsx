@@ -71,10 +71,13 @@ export default function AdminLayout({ user, onLogout }) {
             <Link to="/admin" className="navbar-link">Dashboard</Link>
 
             {/* Manage dropdown */}
-            <div className="navbar-dropdown" onMouseLeave={() => setManageMenuOpen(false)}>
+            <div
+              className="navbar-dropdown"
+              onMouseEnter={() => setManageMenuOpen(true)}
+              onMouseLeave={() => setManageMenuOpen(false)}
+            >
               <button
                 className="navbar-link navbar-dropdown-toggle"
-                onMouseEnter={() => setManageMenuOpen(true)}
                 onClick={() => setManageMenuOpen(!manageMenuOpen)}
               >
                 Manage
@@ -91,10 +94,13 @@ export default function AdminLayout({ user, onLogout }) {
             </div>
 
             {/* Settings dropdown */}
-            <div className="navbar-dropdown" onMouseLeave={() => setSettingsMenuOpen(false)}>
+            <div
+              className="navbar-dropdown"
+              onMouseEnter={() => setSettingsMenuOpen(true)}
+              onMouseLeave={() => setSettingsMenuOpen(false)}
+            >
               <button
                 className="navbar-link navbar-dropdown-toggle"
-                onMouseEnter={() => setSettingsMenuOpen(true)}
                 onClick={() => setSettingsMenuOpen(!settingsMenuOpen)}
               >
                 Settings

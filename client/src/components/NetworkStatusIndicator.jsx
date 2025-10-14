@@ -46,16 +46,32 @@ export default function NetworkStatusIndicator() {
 
   const getStatusText = () => {
     if (status.mode === 'hotspot') {
-      const clientCount = status.clients?.length || 0;
-      return `Hotspot (${clientCount} ${clientCount === 1 ? 'client' : 'clients'})`;
+      return 'Hotspot Active';
     }
     if (status.mode === 'home') {
       if (status.connected) {
-        return status.ssid ? `Connected: ${status.ssid}` : 'Connected to Home Network';
+        return 'WiFi Connected';
       }
       return 'Disconnected';
     }
     return 'Unknown';
+  };
+
+  const getTooltipText = () => {
+    if (status.mode === 'hotspot') {
+      const clientCount = status.clients?.length || 0;
+      const ipInfo = status.ip ? ` (${status.ip})` : '';
+      return `Hotspot Mode: ${clientCount} ${clientCount === 1 ? 'client' : 'clients'} connected${ipInfo}`;
+    }
+    if (status.mode === 'home') {
+      if (status.connected) {
+        const networkName = status.ssid || 'Unknown Network';
+        const ipInfo = status.ip ? ` (${status.ip})` : '';
+        return `Connected to: ${networkName}${ipInfo}`;
+      }
+      return 'Not connected to home network';
+    }
+    return 'Network status unknown';
   };
 
   return (
@@ -76,13 +92,10 @@ export default function NetworkStatusIndicator() {
       onClick={() => window.location.href = '/admin/network'}
       onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
       onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
-      title="Click to view network settings"
+      title={getTooltipText()}
     >
       <span>{getStatusIcon()}</span>
       <span>{getStatusText()}</span>
-      {status.ip && (
-        <span style={{ opacity: 0.8, fontSize: '0.75rem' }}>({status.ip})</span>
-      )}
     </div>
   );
 }
