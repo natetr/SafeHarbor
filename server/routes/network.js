@@ -43,7 +43,8 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
       connection_limit,
       home_network_ssid,
       home_network_password,
-      captive_portal
+      captive_portal,
+      landing_url
     } = req.body;
 
     // Validate mode
@@ -67,6 +68,7 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
       if (home_network_ssid !== undefined) { updates.push('home_network_ssid = ?'); params.push(home_network_ssid); }
       if (home_network_password !== undefined) { updates.push('home_network_password = ?'); params.push(home_network_password); }
       if (captive_portal !== undefined) { updates.push('captive_portal = ?'); params.push(captive_portal ? 1 : 0); }
+      if (landing_url !== undefined) { updates.push('landing_url = ?'); params.push(landing_url); }
 
       updates.push('updated_at = CURRENT_TIMESTAMP');
       params.push(currentConfig.id);
@@ -76,8 +78,8 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
     } else {
       // Insert new config - CRITICAL: Use queued database write
       await safeDbRun(`
-        INSERT INTO network_config (mode, hotspot_ssid, hotspot_password, hotspot_open, connection_limit, home_network_ssid, home_network_password, captive_portal)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO network_config (mode, hotspot_ssid, hotspot_password, hotspot_open, connection_limit, home_network_ssid, home_network_password, captive_portal, landing_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         mode || 'hotspot',
         hotspot_ssid || 'SafeHarbor',
@@ -86,7 +88,8 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
         connection_limit || 10,
         home_network_ssid || null,
         home_network_password || null,
-        captive_portal ? 1 : 0
+        captive_portal ? 1 : 0,
+        landing_url || '/'
       ]);
     }
 

@@ -5,6 +5,8 @@ import NetworkStatusIndicator from '../components/NetworkStatusIndicator';
 export default function AdminLayout({ user, onLogout }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [platformInfo, setPlatformInfo] = useState(null);
+  const [manageMenuOpen, setManageMenuOpen] = useState(false);
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
 
   useEffect(() => {
     fetchPlatformInfo();
@@ -67,15 +69,54 @@ export default function AdminLayout({ user, onLogout }) {
           {/* Desktop menu */}
           <div className="navbar-menu navbar-menu-desktop">
             <Link to="/admin" className="navbar-link">Dashboard</Link>
-            <Link to="/admin/content" className="navbar-link">Content</Link>
-            <Link to="/admin/zim" className="navbar-link">ZIM Libraries</Link>
-            {platformInfo?.canConfigure && (
-              <Link to="/admin/network" className="navbar-link">Network</Link>
-            )}
-            <Link to="/admin/system" className="navbar-link">System</Link>
-            <Link to="/admin/crash-logs" className="navbar-link">Crash Logs</Link>
+
+            {/* Manage dropdown */}
+            <div className="navbar-dropdown" onMouseLeave={() => setManageMenuOpen(false)}>
+              <button
+                className="navbar-link navbar-dropdown-toggle"
+                onMouseEnter={() => setManageMenuOpen(true)}
+                onClick={() => setManageMenuOpen(!manageMenuOpen)}
+              >
+                Manage
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" style={{ marginLeft: '0.25rem', transition: 'transform 0.2s', transform: manageMenuOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+                  <path d="M6 9L1 4h10z"/>
+                </svg>
+              </button>
+              {manageMenuOpen && (
+                <div className="navbar-dropdown-menu">
+                  <Link to="/admin/content" className="navbar-dropdown-item" onClick={() => setManageMenuOpen(false)}>Content Library</Link>
+                  <Link to="/admin/zim" className="navbar-dropdown-item" onClick={() => setManageMenuOpen(false)}>ZIM Libraries</Link>
+                </div>
+              )}
+            </div>
+
+            {/* Settings dropdown */}
+            <div className="navbar-dropdown" onMouseLeave={() => setSettingsMenuOpen(false)}>
+              <button
+                className="navbar-link navbar-dropdown-toggle"
+                onMouseEnter={() => setSettingsMenuOpen(true)}
+                onClick={() => setSettingsMenuOpen(!settingsMenuOpen)}
+              >
+                Settings
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" style={{ marginLeft: '0.25rem', transition: 'transform 0.2s', transform: settingsMenuOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+                  <path d="M6 9L1 4h10z"/>
+                </svg>
+              </button>
+              {settingsMenuOpen && (
+                <div className="navbar-dropdown-menu">
+                  {platformInfo?.canConfigure && (
+                    <Link to="/admin/network" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>Network</Link>
+                  )}
+                  <Link to="/admin/system" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>System</Link>
+                  <Link to="/admin/crash-logs" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>Crash Logs</Link>
+                </div>
+              )}
+            </div>
+
             <Link to="/" className="navbar-link">Guest View</Link>
+
             {platformInfo?.canConfigure && <NetworkStatusIndicator />}
+
             <button onClick={onLogout} className="btn btn-sm btn-danger">Logout</button>
           </div>
 

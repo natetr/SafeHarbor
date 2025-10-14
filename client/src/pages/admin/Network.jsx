@@ -194,6 +194,20 @@ export default function AdminNetwork() {
               onChange={(e) => handleConfigChange('connection_limit', parseInt(e.target.value))}
             />
           </div>
+          <div className="form-group">
+            <label className="form-label">Landing Page URL</label>
+            <input
+              type="text"
+              className="form-input"
+              value={config.landing_url || '/'}
+              onChange={(e) => handleConfigChange('landing_url', e.target.value)}
+              placeholder="/"
+            />
+            <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+              Users connecting to the hotspot will be automatically directed to this URL.
+              Examples: / (home), /zim/wikipedia (specific ZIM)
+            </p>
+          </div>
         </div>
       )}
 

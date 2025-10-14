@@ -107,6 +107,49 @@ body {
   color: var(--text);
 }
 
+/* Dropdown Navigation Styles */
+.navbar-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.navbar-dropdown-toggle {
+  display: flex;
+  align-items: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.5rem 0;
+}
+
+.navbar-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 0.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 180px;
+  z-index: 1000;
+  overflow: hidden;
+}
+
+.navbar-dropdown-item {
+  display: block;
+  padding: 0.75rem 1rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: background-color 0.2s, color 0.2s;
+  white-space: nowrap;
+}
+
+.navbar-dropdown-item:hover {
+  background-color: var(--bg);
+  color: var(--text);
+}
+
 /* Mobile menu toggle button */
 .mobile-menu-toggle {
   display: none;

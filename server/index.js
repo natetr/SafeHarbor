@@ -55,6 +55,7 @@ const storageRoutes = (await import('./routes/storage.js')).default;
 const { startUpdateScheduler } = await import('./services/updateScheduler.js');
 const { handleUncaughtException, handleUnhandledRejection } = await import('./utils/crashReporter.js');
 const { startHealthMonitor, stopHealthMonitor } = await import('./services/healthMonitor.js');
+const captivePortalMiddleware = (await import('./middleware/captivePortal.js')).default;
 
 // Initialize database
 initDatabase();
@@ -151,6 +152,10 @@ app.use(cors({
     : 'http://localhost:5173', // Vite dev server
   credentials: true
 }));
+
+// Captive portal middleware - must be before API routes
+// This handles device captive portal detection and redirects to landing page
+app.use(captivePortalMiddleware);
 
 // API Routes
 // Health check endpoint - uses the new health monitor

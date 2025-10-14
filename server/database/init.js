@@ -664,6 +664,13 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add landing_url column to network_config for customizable welcome page
+  try {
+    db.exec(`ALTER TABLE network_config ADD COLUMN landing_url TEXT DEFAULT '/'`);
+  } catch (err) {
+    // Column already exists
+  }
+
   // Add status and error_message columns for crash detection and quarantine
   try {
     db.exec(`ALTER TABLE zim_libraries ADD COLUMN status TEXT DEFAULT 'active'`);
