@@ -30,14 +30,14 @@ function createBackup() {
       fs.copyFileSync(DB_PATH, backupPath);
       console.log(`✓ Database backup created: ${backupPath}`);
 
-      // Keep only last 5 backups
+      // Keep only last 2 backups (reduced from 5 to save space)
       const backupFiles = fs.readdirSync(dbDir)
         .filter(f => f.startsWith(path.basename(DB_PATH) + '.backup-'))
         .sort()
         .reverse();
 
-      if (backupFiles.length > 5) {
-        backupFiles.slice(5).forEach(f => {
+      if (backupFiles.length > 2) {
+        backupFiles.slice(2).forEach(f => {
           const oldBackupPath = path.join(dbDir, f);
           fs.unlinkSync(oldBackupPath);
           console.log(`✓ Removed old backup: ${f}`);
@@ -363,7 +363,7 @@ backupInterval = setInterval(() => {
   } catch (err) {
     console.error('❌ Automatic backup error:', err.message);
   }
-}, 3600000); // Every hour
+}, 86400000); // Every 24 hours (reduced from hourly to save space)
 
 // Create initial backup on startup
 initialBackupTimeout = setTimeout(() => {
