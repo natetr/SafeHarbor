@@ -185,8 +185,30 @@ app.use((req, res, next) => {
   const start = Date.now();
   const reqInfo = `${req.method} ${req.path}`;
 
+  // Skip logging for frequently polled endpoints (reduce noise in production)
+  const verboseOnlyEndpoints = [
+    '/api/system/stats',
+    '/api/zim/download/progress',
+    '/api/storage/usage',
+    '/api/network/status',
+    '/api/network/config',
+    '/api/network/platform',
+    '/api/zim/settings/auto-index',
+    '/api/zim/update-settings',
+    '/api/auth/verify',
+    '/api/health',
+    '/favicon.svg',
+    '/assets/'
+  ];
+
+  const shouldSkipLog = verboseOnlyEndpoints.some(endpoint => req.path.startsWith(endpoint));
+  const verboseMode = process.env.LOG_LEVEL === 'verbose';
+
   // Log response when finished
   res.on('finish', () => {
+    // Skip logging for polling endpoints unless in verbose mode
+    if (shouldSkipLog && !verboseMode) return;
+
     const duration = Date.now() - start;
     const status = res.statusCode;
     const statusEmoji = status >= 500 ? '❌' : status >= 400 ? '⚠️' : '✓';
