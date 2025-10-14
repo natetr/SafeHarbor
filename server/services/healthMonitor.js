@@ -69,12 +69,63 @@ async function performHealthCheck(restartKiwixCallback) {
   const issues = [];
   let recoveryAttempted = false;
 
-  // Check 1: Memory usage
+  // Check 1: System Memory usage (not just Node.js heap)
   try {
-    const memUsage = process.memoryUsage();
-    const totalMem = memUsage.heapTotal;
-    const usedMem = memUsage.heapUsed;
-    const percentUsed = (usedMem / totalMem) * 100;
+    let totalMem, freeMem, usedMem, percentUsed;
+
+    // Get actual system memory on Linux/macOS
+    if (process.platform === 'linux' || process.platform === 'darwin') {
+      try {
+        // Use free command on Linux or vm_stat on macOS
+        const memInfo = process.platform === 'linux'
+          ? execSync('free -b | grep Mem:', { encoding: 'utf8' })
+          : execSync('vm_stat | grep -E "Pages (free|active|inactive|wired|occupied)"', { encoding: 'utf8' });
+
+        if (process.platform === 'linux') {
+          // Parse: Mem: total used free shared buff/cache available
+          const parts = memInfo.trim().split(/\s+/);
+          totalMem = parseInt(parts[1]);
+          freeMem = parseInt(parts[6] || parts[3]); // Use 'available' if present, else 'free'
+          usedMem = totalMem - freeMem;
+        } else {
+          // macOS: get page size and calculate from vm_stat
+          const pageSize = parseInt(execSync('pagesize', { encoding: 'utf8' }).trim());
+          const lines = memInfo.split('\n');
+          let freePages = 0, activePages = 0, inactivePages = 0, wiredPages = 0;
+
+          lines.forEach(line => {
+            const match = line.match(/Pages\s+(\w+):\s+(\d+)/);
+            if (match) {
+              const [, type, pages] = match;
+              const pageCount = parseInt(pages);
+              if (type === 'free') freePages = pageCount;
+              else if (type === 'active') activePages = pageCount;
+              else if (type === 'inactive') inactivePages = pageCount;
+              else if (type === 'wired') wiredPages = pageCount;
+            }
+          });
+
+          // Calculate total and used memory
+          totalMem = (freePages + activePages + inactivePages + wiredPages) * pageSize;
+          usedMem = (activePages + wiredPages) * pageSize;
+          freeMem = totalMem - usedMem;
+        }
+
+        percentUsed = (usedMem / totalMem) * 100;
+      } catch (cmdErr) {
+        // Fallback to Node.js heap if system command fails
+        const memUsage = process.memoryUsage();
+        totalMem = memUsage.heapTotal;
+        usedMem = memUsage.heapUsed;
+        percentUsed = (usedMem / totalMem) * 100;
+      }
+    } else {
+      // Fallback for other platforms (Windows, etc.)
+      const memUsage = process.memoryUsage();
+      totalMem = memUsage.heapTotal;
+      usedMem = memUsage.heapUsed;
+      percentUsed = (usedMem / totalMem) * 100;
+    }
 
     if (percentUsed > THRESHOLDS.MEMORY_PERCENT) {
       const issue = {
@@ -88,7 +139,7 @@ async function performHealthCheck(restartKiwixCallback) {
       // Log to database
       await zimLogger.health.logIssue({
         issueType: 'memory',
-        details: `Memory usage: ${percentUsed.toFixed(1)}% (${Math.round(usedMem / 1024 / 1024)}MB / ${Math.round(totalMem / 1024 / 1024)}MB)`,
+        details: `System memory usage: ${percentUsed.toFixed(1)}% (${Math.round(usedMem / 1024 / 1024)}MB / ${Math.round(totalMem / 1024 / 1024)}MB)`,
         errorMessage: issue.message
       });
 
@@ -338,14 +389,63 @@ export async function checkHealth() {
     checks: {}
   };
 
-  // Quick memory check
+  // Quick system memory check
   try {
-    const memUsage = process.memoryUsage();
-    const percentUsed = (memUsage.heapUsed / memUsage.heapTotal) * 100;
+    let totalMem, usedMem, percentUsed;
+
+    // Get actual system memory on Linux/macOS (same as above)
+    if (process.platform === 'linux' || process.platform === 'darwin') {
+      try {
+        const memInfo = process.platform === 'linux'
+          ? execSync('free -b | grep Mem:', { encoding: 'utf8' })
+          : execSync('vm_stat | grep -E "Pages (free|active|inactive|wired)"', { encoding: 'utf8' });
+
+        if (process.platform === 'linux') {
+          const parts = memInfo.trim().split(/\s+/);
+          totalMem = parseInt(parts[1]);
+          const freeMem = parseInt(parts[6] || parts[3]);
+          usedMem = totalMem - freeMem;
+        } else {
+          // macOS
+          const pageSize = parseInt(execSync('pagesize', { encoding: 'utf8' }).trim());
+          const lines = memInfo.split('\n');
+          let freePages = 0, activePages = 0, inactivePages = 0, wiredPages = 0;
+
+          lines.forEach(line => {
+            const match = line.match(/Pages\s+(\w+):\s+(\d+)/);
+            if (match) {
+              const pageCount = parseInt(match[2]);
+              if (match[1] === 'free') freePages = pageCount;
+              else if (match[1] === 'active') activePages = pageCount;
+              else if (match[1] === 'inactive') inactivePages = pageCount;
+              else if (match[1] === 'wired') wiredPages = pageCount;
+            }
+          });
+
+          totalMem = (freePages + activePages + inactivePages + wiredPages) * pageSize;
+          usedMem = (activePages + wiredPages) * pageSize;
+        }
+
+        percentUsed = (usedMem / totalMem) * 100;
+      } catch (cmdErr) {
+        // Fallback to Node.js heap
+        const memUsage = process.memoryUsage();
+        totalMem = memUsage.heapTotal;
+        usedMem = memUsage.heapUsed;
+        percentUsed = (usedMem / totalMem) * 100;
+      }
+    } else {
+      // Fallback for other platforms
+      const memUsage = process.memoryUsage();
+      totalMem = memUsage.heapTotal;
+      usedMem = memUsage.heapUsed;
+      percentUsed = (usedMem / totalMem) * 100;
+    }
+
     health.checks.memory = {
       status: percentUsed < THRESHOLDS.MEMORY_PERCENT ? 'ok' : 'warning',
-      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
-      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+      usedMB: Math.round(usedMem / 1024 / 1024),
+      totalMB: Math.round(totalMem / 1024 / 1024),
       percentUsed: Math.round(percentUsed)
     };
   } catch (err) {

@@ -552,7 +552,17 @@ export async function clearExpiredCache() {
 }
 
 // Run cache cleanup every 10 minutes
-setInterval(clearExpiredCache, 600000);
+let cacheCleanupInterval = null;
+
+// Clear any existing interval (important for hot-reload/restart scenarios)
+if (cacheCleanupInterval) clearInterval(cacheCleanupInterval);
+
+cacheCleanupInterval = setInterval(clearExpiredCache, 600000);
+
+// Clean up on process exit
+process.on('beforeExit', () => {
+  if (cacheCleanupInterval) clearInterval(cacheCleanupInterval);
+});
 
 // ============================================================================
 // UNIFIED SEARCH

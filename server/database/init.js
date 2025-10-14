@@ -350,7 +350,14 @@ setInterval(() => {
 
 // Automatic database backup - every hour
 // This ensures we always have recent backups for corruption recovery
-setInterval(() => {
+let backupInterval = null;
+let initialBackupTimeout = null;
+
+// Clear any existing intervals (important for hot-reload/restart scenarios)
+if (backupInterval) clearInterval(backupInterval);
+if (initialBackupTimeout) clearTimeout(initialBackupTimeout);
+
+backupInterval = setInterval(() => {
   try {
     createBackup();
   } catch (err) {
@@ -359,13 +366,19 @@ setInterval(() => {
 }, 3600000); // Every hour
 
 // Create initial backup on startup
-setTimeout(() => {
+initialBackupTimeout = setTimeout(() => {
   try {
     createBackup();
   } catch (err) {
     console.error('❌ Initial backup error:', err.message);
   }
 }, 60000); // After 1 minute of runtime
+
+// Clean up on process exit
+process.on('beforeExit', () => {
+  if (backupInterval) clearInterval(backupInterval);
+  if (initialBackupTimeout) clearTimeout(initialBackupTimeout);
+});
 
 export function initDatabase() {
   // Users table

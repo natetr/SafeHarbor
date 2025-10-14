@@ -13,8 +13,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Ports used by SafeHarbor
-PORTS=(4000 8080)
-EXPRESS_PORT=4000
+PORTS=(3000 8080)
+EXPRESS_PORT=3000
 KIWIX_PORT=8080
 
 echo -e "${BLUE}🧹 SafeHarbor Clean Start${NC}"
@@ -133,7 +133,7 @@ if [ "$all_clear" = true ]; then
 else
     echo -e "${RED}✗ Failed to free all required ports${NC}"
     echo -e "${YELLOW}Please manually check what's using the ports:${NC}"
-    echo -e "  lsof -ti:4000"
+    echo -e "  lsof -ti:3000"
     echo -e "  lsof -ti:8080"
     exit 1
 fi

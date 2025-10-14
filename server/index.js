@@ -7,6 +7,7 @@ import { rateLimit } from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { execSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +17,61 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Kill any zombie Node.js or kiwix-serve processes before starting
+// This prevents memory leaks from leftover processes on restarts
+if (process.env.NODE_ENV === 'production') {
+  try {
+    console.log('🧹 Checking for zombie processes...');
+
+    // Find and kill orphaned node processes (not this PID)
+    const currentPid = process.pid;
+    try {
+      const nodeProcs = execSync(`pgrep -f "node.*server/index.js" || true`, { encoding: 'utf8' }).trim();
+      if (nodeProcs) {
+        const pids = nodeProcs.split('\n').filter(pid => pid && parseInt(pid) !== currentPid);
+        if (pids.length > 0) {
+          console.log(`   Found ${pids.length} zombie node process(es), cleaning up...`);
+          pids.forEach(pid => {
+            try {
+              execSync(`kill -9 ${pid}`);
+              console.log(`   ✓ Killed zombie node process: ${pid}`);
+            } catch (err) {
+              // Process may have already died, ignore
+            }
+          });
+        }
+      }
+    } catch (err) {
+      // No zombie processes found or command failed, continue
+    }
+
+    // Find and kill orphaned kiwix-serve processes
+    try {
+      const kiwixProcs = execSync(`pgrep -f "kiwix-serve" || true`, { encoding: 'utf8' }).trim();
+      if (kiwixProcs) {
+        const pids = kiwixProcs.split('\n').filter(pid => pid);
+        if (pids.length > 0) {
+          console.log(`   Found ${pids.length} zombie kiwix-serve process(es), cleaning up...`);
+          pids.forEach(pid => {
+            try {
+              execSync(`kill -9 ${pid}`);
+              console.log(`   ✓ Killed zombie kiwix-serve process: ${pid}`);
+            } catch (err) {
+              // Process may have already died, ignore
+            }
+          });
+        }
+      }
+    } catch (err) {
+      // No zombie processes found or command failed, continue
+    }
+
+    console.log('✓ Zombie process cleanup complete');
+  } catch (err) {
+    console.warn('⚠️  Could not check for zombie processes:', err.message);
+  }
+}
 
 // Create necessary directories
 const dirs = [

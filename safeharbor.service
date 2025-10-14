@@ -34,11 +34,18 @@ Group=pi
 # Working directory (change to your installation path)
 WorkingDirectory=/home/pi/SafeHarbor
 
+# Pre-start: Kill any zombie processes from previous crashes/restarts
+ExecStartPre=/bin/bash /home/pi/SafeHarbor/scripts/clean-start.sh
+
 # Start command (update path if Node.js is elsewhere)
 ExecStart=/usr/bin/node server/index.js
 
 # Environment
 Environment=NODE_ENV=production
+
+# Process cleanup - ensure ALL child processes (kiwix-serve) are killed on stop
+KillMode=control-group
+KillSignal=SIGTERM
 
 # Restart policy - only restart on failure, not on intentional exit
 Restart=on-failure
