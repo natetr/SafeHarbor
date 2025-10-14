@@ -31,7 +31,11 @@ router.get('/stats', authenticateToken, requireAdmin, async (req, res) => {
         total: mem.total,
         used: mem.used,
         free: mem.free,
-        percentage: ((mem.used / mem.total) * 100).toFixed(2)
+        available: mem.available,
+        // Use 'available' for percentage calculation, not 'used'
+        // 'used' includes buffers/cache which are reclaimable
+        // 'available' is the actual free memory for applications
+        percentage: (((mem.total - mem.available) / mem.total) * 100).toFixed(2)
       },
       disk: disk.map(d => ({
         fs: d.fs,
