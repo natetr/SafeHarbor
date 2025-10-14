@@ -200,7 +200,9 @@ StandardError=journal
 SyslogIdentifier=safeharbor
 
 # Security hardening
-NoNewPrivileges=true
+# NOTE: NoNewPrivileges is disabled to allow network configuration via sudo
+# This is required for hotspot mode and home network switching
+# Access to sudo commands is restricted via /etc/sudoers.d/safeharbor
 PrivateTmp=true
 
 # Protect system directories
@@ -234,6 +236,12 @@ usermod -a -G netdev safeharbor
 usermod -a -G sudo safeharbor
 
 # Create sudoers file for network management
+# SECURITY NOTE: The safeharbor service requires sudo access to configure network settings
+# (hotspot mode, home network switching, etc.). To minimize security risks:
+#   1. NoNewPrivileges is disabled in the systemd service (required for sudo to work)
+#   2. Sudo access is limited to ONLY the specific commands below (no password required)
+#   3. The service runs as a non-root user (safeharbor)
+#   4. Only admin users authenticated via JWT can trigger network changes
 cat > /etc/sudoers.d/safeharbor <<EOF
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/hostapd
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/dnsmasq

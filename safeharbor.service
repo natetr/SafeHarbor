@@ -76,7 +76,9 @@ StandardError=journal
 SyslogIdentifier=safeharbor
 
 # Security hardening
-NoNewPrivileges=true
+# NOTE: NoNewPrivileges is disabled to allow network configuration via sudo
+# This is required for hotspot mode and home network switching
+# Access to sudo commands is restricted via /etc/sudoers.d/safeharbor
 PrivateTmp=true
 
 # Protect system directories
