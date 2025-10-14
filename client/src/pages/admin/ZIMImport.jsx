@@ -159,8 +159,21 @@ export default function ZIMImport() {
       return;
     }
 
-    if (networkMode !== 'home') {
-      if (!confirm('Warning: You are not in Home Network Mode. Downloads require an internet connection. Continue anyway?')) {
+    // Block downloads in hotspot mode (not just warn)
+    if (networkMode === 'hotspot') {
+      const proceed = confirm(
+        '⚠ HOTSPOT MODE DETECTED\n\n' +
+        'You are currently in Hotspot Mode, which does not provide internet connectivity.\n\n' +
+        'ZIM downloads REQUIRE internet access and will fail in hotspot mode.\n\n' +
+        'Please switch to Home Network Mode in Network Settings before downloading ZIMs.\n\n' +
+        'Attempt download anyway? (Not recommended)'
+      );
+      if (!proceed) {
+        return;
+      }
+    } else if (networkMode !== 'home') {
+      // Unknown network mode - warn but allow
+      if (!confirm('Warning: Network mode could not be determined. Downloads require an internet connection. Continue anyway?')) {
         return;
       }
     }
@@ -261,23 +274,54 @@ export default function ZIMImport() {
       {networkMode && networkMode !== 'home' && (
         <div
           style={{
-            padding: '1rem',
-            background: 'var(--warning-bg)',
-            border: '1px solid var(--warning)',
-            borderRadius: '4px',
+            padding: '1.25rem',
+            background: networkMode === 'hotspot' ? '#ff4444' : 'var(--warning-bg)',
+            color: networkMode === 'hotspot' ? 'white' : 'inherit',
+            border: networkMode === 'hotspot' ? '2px solid #cc0000' : '2px solid var(--warning)',
+            borderRadius: '6px',
             marginBottom: '1rem',
             display: 'flex',
-            alignItems: 'center',
-            gap: '0.5rem'
+            alignItems: 'flex-start',
+            gap: '0.75rem'
           }}
         >
-          <span style={{ fontSize: '1.5rem' }}>⚠️</span>
-          <div>
-            <strong>Not in Home Network Mode</strong>
-            <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.875rem' }}>
-              You are currently in {networkMode === 'hotspot' ? 'Hotspot' : 'Unknown'} mode.
-              Downloading ZIMs requires an internet connection. Switch to Home Network Mode for best results.
+          <span style={{ fontSize: '2rem', flexShrink: 0 }}>⚠️</span>
+          <div style={{ flex: 1 }}>
+            <strong style={{ fontSize: '1.1rem', display: 'block', marginBottom: '0.5rem' }}>
+              {networkMode === 'hotspot' ? '🚫 Hotspot Mode - Downloads Unavailable' : 'Not in Home Network Mode'}
+            </strong>
+            <p style={{ margin: '0', fontSize: '0.875rem', lineHeight: '1.5' }}>
+              {networkMode === 'hotspot' ? (
+                <>
+                  You are currently in <strong>Hotspot Mode</strong>, which broadcasts a Wi-Fi network but does not provide internet connectivity.
+                  <br />
+                  <strong>ZIM downloads will fail without internet access.</strong>
+                  <br />
+                  <br />
+                  Please switch to <strong>Home Network Mode</strong> in Network Settings to download ZIM files.
+                </>
+              ) : (
+                <>
+                  You are currently in {networkMode} mode.
+                  Downloading ZIMs requires an internet connection. Switch to Home Network Mode for best results.
+                </>
+              )}
             </p>
+            <button
+              onClick={() => window.location.href = '/admin/network'}
+              style={{
+                marginTop: '0.75rem',
+                padding: '0.5rem 1rem',
+                background: 'white',
+                color: networkMode === 'hotspot' ? '#cc0000' : 'var(--warning)',
+                border: 'none',
+                borderRadius: '4px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              → Go to Network Settings
+            </button>
           </div>
         </div>
       )}

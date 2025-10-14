@@ -4,10 +4,13 @@ export default function AdminNetwork() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [platformInfo, setPlatformInfo] = useState(null);
 
   useEffect(() => {
     fetchConfig();
     fetchStatus();
+    fetchPlatformInfo();
   }, []);
 
   const fetchConfig = async () => {
@@ -36,6 +39,19 @@ export default function AdminNetwork() {
     }
   };
 
+  const fetchPlatformInfo = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/network/platform', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setPlatformInfo(data);
+    } catch (err) {
+      console.error('Failed to fetch platform info:', err);
+    }
+  };
+
   const handleConfigChange = (field, value) => {
     setConfig({ ...config, [field]: value });
   };
@@ -54,7 +70,7 @@ export default function AdminNetwork() {
       });
 
       if (response.ok) {
-        alert('Configuration saved! Note: On a Raspberry Pi, you would click "Apply" to activate changes.');
+        alert('Configuration saved! Click "Apply Changes" to activate the new network mode.');
         fetchConfig();
       } else {
         alert('Failed to save configuration');
@@ -64,6 +80,52 @@ export default function AdminNetwork() {
       alert('Save failed: ' + err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleApply = async () => {
+    if (!platformInfo?.canConfigure) {
+      alert(`Cannot apply network changes: ${platformInfo?.reason || 'Platform not supported'}`);
+      return;
+    }
+
+    const mode = config.mode === 'hotspot' ? 'Hotspot Mode' : 'Home Network Mode';
+    const warning = config.mode === 'hotspot'
+      ? `This will configure the Raspberry Pi as a Wi-Fi hotspot.\n\nNetwork: ${config.hotspot_ssid}\nYou will need to reconnect to this network after the change.\n\nNote: In hotspot mode, you cannot download ZIM files. Switch to Home Network mode for downloads.`
+      : `This will connect the Raspberry Pi to your home network.\n\nNetwork: ${config.home_network_ssid}\nThe device will disconnect from the current network temporarily.\n\nContinue?`;
+
+    if (!confirm(`Apply ${mode}?\n\n${warning}`)) {
+      return;
+    }
+
+    setApplying(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/network/apply', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        alert(`${data.message}\n\nNetwork configuration applied successfully!`);
+
+        // Refresh status after a delay to allow network to stabilize
+        setTimeout(() => {
+          fetchStatus();
+        }, 5000);
+      } else {
+        alert('Failed to apply network changes: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Apply failed:', err);
+      alert('Apply failed: ' + err.message);
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -167,16 +229,14 @@ export default function AdminNetwork() {
         >
           {loading ? 'Saving...' : 'Save Configuration'}
         </button>
-        <button className="btn btn-secondary" disabled>
-          Apply Changes (Raspberry Pi Only)
+        <button
+          onClick={handleApply}
+          disabled={applying || !platformInfo?.canConfigure}
+          className="btn btn-secondary"
+          title={!platformInfo?.canConfigure ? platformInfo?.reason : 'Apply network configuration'}
+        >
+          {applying ? 'Applying...' : 'Apply Changes'}
         </button>
-      </div>
-
-      <div className="card mt-3">
-        <p className="text-muted">
-          <strong>Note:</strong> Network configuration changes only take effect on a Raspberry Pi.
-          On your local machine, you can test the UI but actual network changes won't occur.
-        </p>
       </div>
     </div>
   );

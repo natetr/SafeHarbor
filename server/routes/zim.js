@@ -951,6 +951,21 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
   let operationId;
 
   try {
+    // Check network mode - downloads require home network mode with internet access
+    try {
+      const networkConfig = await safeDbGet('SELECT mode FROM network_config ORDER BY id DESC LIMIT 1', []);
+      if (networkConfig && networkConfig.mode === 'hotspot') {
+        zimLogger.download.warn('Download blocked: device is in hotspot mode');
+        return res.status(400).json({
+          error: 'Cannot download ZIMs in Hotspot Mode',
+          details: 'Switch to Home Network Mode to download ZIM files. Hotspot mode does not provide internet connectivity for downloads.'
+        });
+      }
+    } catch (netErr) {
+      // If we can't check network mode, log warning but allow (for development/testing)
+      zimLogger.download.warn('Could not check network mode, proceeding with download', { error: netErr.message });
+    }
+
     const { url, title, description, language, size, articleCount, mediaCount, updated } = req.body;
 
     if (!url) {

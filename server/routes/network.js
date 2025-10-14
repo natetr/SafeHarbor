@@ -4,9 +4,21 @@ import { promisify } from 'util';
 import { authenticateToken, requireAdmin } from '../middleware/auth.js';
 import db, { safeDbGet, safeDbRun } from '../database/init.js';
 import fs from 'fs';
+import { detectPlatform, canConfigureNetwork } from '../utils/platformDetection.js';
 
 const router = express.Router();
 const execAsync = promisify(exec);
+
+// Get platform information
+router.get('/platform', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const platformCheck = await canConfigureNetwork();
+    res.json(platformCheck);
+  } catch (err) {
+    console.error('Error checking platform:', err);
+    res.status(500).json({ error: 'Failed to detect platform', canConfigure: false, reason: err.message });
+  }
+});
 
 // Get current network configuration
 router.get('/config', authenticateToken, requireAdmin, async (req, res) => {
@@ -88,12 +100,23 @@ router.put('/config', authenticateToken, requireAdmin, async (req, res) => {
 // Apply network configuration
 router.post('/apply', authenticateToken, requireAdmin, async (req, res) => {
   try {
+    // Check if platform supports network configuration
+    const platformCheck = await canConfigureNetwork();
+    if (!platformCheck.canConfigure) {
+      return res.status(400).json({
+        error: 'Network configuration not supported on this platform',
+        details: platformCheck.reason
+      });
+    }
+
     // CRITICAL: Use queued database read
     const config = await safeDbGet('SELECT * FROM network_config ORDER BY id DESC LIMIT 1', []);
 
     if (!config) {
       return res.status(400).json({ error: 'No network configuration found' });
     }
+
+    console.log(`Applying network configuration: ${config.mode} mode`);
 
     if (config.mode === 'hotspot') {
       await applyHotspotConfig(config);

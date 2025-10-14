@@ -1,8 +1,32 @@
 import { Outlet, Link } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import NetworkStatusIndicator from '../components/NetworkStatusIndicator';
 
 export default function AdminLayout({ user, onLogout }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [platformInfo, setPlatformInfo] = useState(null);
+
+  useEffect(() => {
+    fetchPlatformInfo();
+  }, []);
+
+  const fetchPlatformInfo = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) return;
+
+      const response = await fetch('/api/network/platform', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setPlatformInfo(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch platform info:', err);
+    }
+  };
 
   return (
     <div className="layout">
@@ -45,10 +69,13 @@ export default function AdminLayout({ user, onLogout }) {
             <Link to="/admin" className="navbar-link">Dashboard</Link>
             <Link to="/admin/content" className="navbar-link">Content</Link>
             <Link to="/admin/zim" className="navbar-link">ZIM Libraries</Link>
-            <Link to="/admin/network" className="navbar-link">Network</Link>
+            {platformInfo?.canConfigure && (
+              <Link to="/admin/network" className="navbar-link">Network</Link>
+            )}
             <Link to="/admin/system" className="navbar-link">System</Link>
             <Link to="/admin/crash-logs" className="navbar-link">Crash Logs</Link>
             <Link to="/" className="navbar-link">Guest View</Link>
+            {platformInfo?.canConfigure && <NetworkStatusIndicator />}
             <button onClick={onLogout} className="btn btn-sm btn-danger">Logout</button>
           </div>
 
@@ -58,7 +85,9 @@ export default function AdminLayout({ user, onLogout }) {
               <Link to="/admin" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Dashboard</Link>
               <Link to="/admin/content" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Content</Link>
               <Link to="/admin/zim" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>ZIM Libraries</Link>
-              <Link to="/admin/network" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Network</Link>
+              {platformInfo?.canConfigure && (
+                <Link to="/admin/network" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Network</Link>
+              )}
               <Link to="/admin/system" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>System</Link>
               <Link to="/admin/crash-logs" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Crash Logs</Link>
               <Link to="/" className="navbar-link-mobile" onClick={() => setMobileMenuOpen(false)}>Guest View</Link>
