@@ -87,8 +87,10 @@ export default function AdminLayout({ user, onLogout }) {
               </button>
               {manageMenuOpen && (
                 <div className="navbar-dropdown-menu">
-                  <Link to="/admin/content" className="navbar-dropdown-item" onClick={() => setManageMenuOpen(false)}>Content Library</Link>
-                  <Link to="/admin/zim" className="navbar-dropdown-item" onClick={() => setManageMenuOpen(false)}>ZIM Libraries</Link>
+                  <div className="navbar-dropdown-menu-inner">
+                    <Link to="/admin/content" className="navbar-dropdown-item" onClick={() => setManageMenuOpen(false)}>Content Library</Link>
+                    <Link to="/admin/zim" className="navbar-dropdown-item" onClick={() => setManageMenuOpen(false)}>ZIM Libraries</Link>
+                  </div>
                 </div>
               )}
             </div>
@@ -110,11 +112,13 @@ export default function AdminLayout({ user, onLogout }) {
               </button>
               {settingsMenuOpen && (
                 <div className="navbar-dropdown-menu">
-                  {platformInfo?.canConfigure && (
-                    <Link to="/admin/network" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>Network</Link>
-                  )}
-                  <Link to="/admin/system" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>System</Link>
-                  <Link to="/admin/crash-logs" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>Crash Logs</Link>
+                  <div className="navbar-dropdown-menu-inner">
+                    {platformInfo?.canConfigure && (
+                      <Link to="/admin/network" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>Network</Link>
+                    )}
+                    <Link to="/admin/system" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>System</Link>
+                    <Link to="/admin/crash-logs" className="navbar-dropdown-item" onClick={() => setSettingsMenuOpen(false)}>Crash Logs</Link>
+                  </div>
                 </div>
               )}
             </div>
