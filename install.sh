@@ -303,6 +303,40 @@ EOF
 
 chmod 440 /etc/sudoers.d/safeharbor
 
+# Configure NetworkManager to not interfere with wlan0
+# SafeHarbor manages wlan0 directly for hotspot and home network modes
+if command -v nmcli &> /dev/null; then
+  echo "Configuring NetworkManager to ignore wlan0..."
+
+  # Create NetworkManager configuration
+  mkdir -p /etc/NetworkManager/conf.d
+  cat > /etc/NetworkManager/conf.d/safeharbor-unmanaged.conf <<EOF
+# SafeHarbor Network Configuration
+# This file prevents NetworkManager from managing the wireless interface
+# SafeHarbor manages the interface directly for hotspot and home network modes
+
+[keyfile]
+unmanaged-devices=interface-name:wlan0
+EOF
+
+  # Remove any existing wlan0 connections
+  CONNECTIONS=$(nmcli -t -f NAME,DEVICE connection show 2>/dev/null | grep ":wlan0$" | cut -d: -f1 || true)
+  if [ -n "$CONNECTIONS" ]; then
+    while IFS= read -r conn; do
+      echo "  Removing NetworkManager connection: $conn"
+      nmcli connection delete "$conn" 2>/dev/null || true
+    done <<< "$CONNECTIONS"
+  fi
+
+  # Reload NetworkManager
+  systemctl reload NetworkManager 2>/dev/null || true
+
+  echo "✓ NetworkManager configured to ignore wlan0"
+  echo "  SafeHarbor now has full control over the wireless interface"
+else
+  echo "NetworkManager not installed - no configuration needed"
+fi
+
 echo "================================"
 echo "Installation Complete!"
 echo "================================"

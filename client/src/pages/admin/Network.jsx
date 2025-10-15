@@ -90,13 +90,49 @@ export default function AdminNetwork() {
     }
 
     const mode = config.mode === 'hotspot' ? 'Hotspot Mode' : 'Home Network Mode';
-    const warning = config.mode === 'hotspot'
-      ? `This will configure the Raspberry Pi as a Wi-Fi hotspot.\n\nNetwork: ${config.hotspot_ssid}\nYou will need to reconnect to this network after the change.\n\nNote: In hotspot mode, you cannot download ZIM files. Switch to Home Network mode for downloads.`
-      : `This will connect the Raspberry Pi to your home network.\n\nNetwork: ${config.home_network_ssid}\nThe device will disconnect from the current network temporarily.\n\nContinue?`;
 
-    if (!confirm(`Apply ${mode}?\n\n${warning}`)) {
+    // Build detailed warning message based on mode
+    let warning;
+    let nextSteps;
+
+    if (config.mode === 'hotspot') {
+      warning = `This will configure the Raspberry Pi as a Wi-Fi hotspot.\n\n` +
+                `Hotspot Network: ${config.hotspot_ssid}\n` +
+                `Domain: ${config.hotspot_domain || 'safeharbor.local'}\n\n` +
+                `⚠️  IMPORTANT - What happens next:\n` +
+                `1. The device will disconnect from the current network\n` +
+                `2. This page will become inaccessible temporarily\n` +
+                `3. Wait 30-60 seconds for the hotspot to start\n` +
+                `4. Look for WiFi network "${config.hotspot_ssid}" on your device\n` +
+                `5. Connect to "${config.hotspot_ssid}"\n` +
+                `6. Access SafeHarbor at: http://${config.hotspot_domain || 'safeharbor.local'}:3000\n\n` +
+                `Note: Hotspot mode doesn't provide WiFi internet. If you need to download ZIM files, use Ethernet or switch to Home Network mode.`;
+      nextSteps = `After clicking OK:\n• This page will disconnect\n• Wait for hotspot "${config.hotspot_ssid}" to appear\n• Connect and visit http://${config.hotspot_domain || 'safeharbor.local'}:3000`;
+    } else {
+      warning = `This will connect the Raspberry Pi to your home network.\n\n` +
+                `Network: ${config.home_network_ssid}\n\n` +
+                `⚠️  IMPORTANT - What happens next:\n` +
+                `1. The device will disconnect from the current network\n` +
+                `2. This page will become inaccessible temporarily\n` +
+                `3. The device will attempt to connect to "${config.home_network_ssid}"\n` +
+                `4. If connection succeeds:\n` +
+                `   - Connect your device to the same WiFi network\n` +
+                `   - Access SafeHarbor using the device's IP address\n` +
+                `   - Check your router for the IP, or use: http://safeharbor.local:3000\n` +
+                `5. If connection fails:\n` +
+                `   - The device will automatically fall back to hotspot mode\n` +
+                `   - Look for hotspot "${config.hotspot_ssid}"\n` +
+                `   - Reconnect and check network settings\n\n` +
+                `⚠️  Make sure your WiFi password is correct!`;
+      nextSteps = `After clicking OK:\n• This page will disconnect\n• Device attempts to connect to "${config.home_network_ssid}"\n• If successful, reconnect and find the new IP\n• If failed, device falls back to hotspot mode`;
+    }
+
+    if (!confirm(`Apply ${mode}?\n\n${warning}\n\nContinue?`)) {
       return;
     }
+
+    // Show detailed next steps
+    alert(nextSteps);
 
     setApplying(true);
     try {
@@ -112,18 +148,43 @@ export default function AdminNetwork() {
       const data = await response.json();
 
       if (response.ok) {
-        alert(`${data.message}\n\nNetwork configuration applied successfully!`);
+        if (config.mode === 'hotspot') {
+          alert(
+            `Network configuration is being applied!\n\n` +
+            `The device is switching to hotspot mode.\n\n` +
+            `NEXT STEPS:\n` +
+            `1. This page will disconnect in a moment\n` +
+            `2. Wait 30-60 seconds\n` +
+            `3. Look for WiFi network: "${config.hotspot_ssid}"\n` +
+            `4. Connect to it\n` +
+            `5. Visit: http://${config.hotspot_domain || 'safeharbor.local'}:3000\n` +
+            `   or http://192.168.4.1:3000`
+          );
+        } else {
+          alert(
+            `Network configuration is being applied!\n\n` +
+            `The device is attempting to connect to: ${config.home_network_ssid}\n\n` +
+            `NEXT STEPS:\n` +
+            `1. This page will disconnect in a moment\n` +
+            `2. Wait 30-60 seconds for connection attempt\n` +
+            `3. Connect your device to the same WiFi: ${config.home_network_ssid}\n` +
+            `4. Find the device's new IP (check your router or use mDNS)\n` +
+            `5. Visit: http://safeharbor.local:3000 or http://<device-ip>:3000\n\n` +
+            `If connection fails, the device will automatically switch back to hotspot mode.\n` +
+            `Look for hotspot: "${config.hotspot_ssid}"`
+          );
+        }
 
         // Refresh status after a delay to allow network to stabilize
         setTimeout(() => {
           fetchStatus();
         }, 5000);
       } else {
-        alert('Failed to apply network changes: ' + (data.error || 'Unknown error'));
+        alert('Failed to apply network changes:\n\n' + (data.error || 'Unknown error'));
       }
     } catch (err) {
       console.error('Apply failed:', err);
-      alert('Apply failed: ' + err.message);
+      alert('Failed to apply network changes:\n\n' + err.message);
     } finally {
       setApplying(false);
     }

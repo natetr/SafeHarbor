@@ -112,6 +112,7 @@ const { startUpdateScheduler } = await import('./services/updateScheduler.js');
 const { handleUncaughtException, handleUnhandledRejection } = await import('./utils/crashReporter.js');
 const { startHealthMonitor, stopHealthMonitor } = await import('./services/healthMonitor.js');
 const captivePortalMiddleware = (await import('./middleware/captivePortal.js')).default;
+const { applyNetworkConfigOnStartup } = await import('./utils/networkStartup.js');
 
 // Initialize database
 initDatabase();
@@ -151,6 +152,10 @@ try {
 
 // Cleanup orphaned ZIM files and start Kiwix server after database is ready
 setTimeout(async () => {
+  // Apply network configuration on startup (hotspot or home network mode)
+  // This ensures the Pi uses the configured network after power cycle
+  await applyNetworkConfigOnStartup();
+
   // Clean up orphaned ZIM files before starting Kiwix
   await cleanupOrphanedZims();
 

@@ -159,24 +159,9 @@ export default function ZIMImport() {
       return;
     }
 
-    // Block downloads in hotspot mode (not just warn)
-    if (networkMode === 'hotspot') {
-      const proceed = confirm(
-        '⚠ HOTSPOT MODE DETECTED\n\n' +
-        'You are currently in Hotspot Mode, which does not provide internet connectivity.\n\n' +
-        'ZIM downloads REQUIRE internet access and will fail in hotspot mode.\n\n' +
-        'Please switch to Home Network Mode in Network Settings before downloading ZIMs.\n\n' +
-        'Attempt download anyway? (Not recommended)'
-      );
-      if (!proceed) {
-        return;
-      }
-    } else if (networkMode !== 'home') {
-      // Unknown network mode - warn but allow
-      if (!confirm('Warning: Network mode could not be determined. Downloads require an internet connection. Continue anyway?')) {
-        return;
-      }
-    }
+    // Note: Hotspot mode doesn't provide WiFi internet, but the device may have
+    // Ethernet connectivity. We show a warning banner but don't block downloads.
+    // The user knows their network setup better than we do.
 
     const totalSize = getTotalSize();
     const available = storage?.available || 0;
@@ -275,9 +260,9 @@ export default function ZIMImport() {
         <div
           style={{
             padding: '1.25rem',
-            background: networkMode === 'hotspot' ? '#ff4444' : 'var(--warning-bg)',
-            color: networkMode === 'hotspot' ? 'white' : 'inherit',
-            border: networkMode === 'hotspot' ? '2px solid #cc0000' : '2px solid var(--warning)',
+            background: 'var(--warning-bg)',
+            color: 'inherit',
+            border: '2px solid var(--warning)',
             borderRadius: '6px',
             marginBottom: '1rem',
             display: 'flex',
@@ -285,20 +270,18 @@ export default function ZIMImport() {
             gap: '0.75rem'
           }}
         >
-          <span style={{ fontSize: '2rem', flexShrink: 0 }}>⚠️</span>
+          <span style={{ fontSize: '2rem', flexShrink: 0 }}>ℹ️</span>
           <div style={{ flex: 1 }}>
             <strong style={{ fontSize: '1.1rem', display: 'block', marginBottom: '0.5rem' }}>
-              {networkMode === 'hotspot' ? '🚫 Hotspot Mode - Downloads Unavailable' : 'Not in Home Network Mode'}
+              {networkMode === 'hotspot' ? 'Hotspot Mode - Internet May Be Required' : 'Not in Home Network Mode'}
             </strong>
             <p style={{ margin: '0', fontSize: '0.875rem', lineHeight: '1.5' }}>
               {networkMode === 'hotspot' ? (
                 <>
-                  You are currently in <strong>Hotspot Mode</strong>, which broadcasts a Wi-Fi network but does not provide internet connectivity.
-                  <br />
-                  <strong>ZIM downloads will fail without internet access.</strong>
+                  You are currently in <strong>Hotspot Mode</strong>. Hotspot mode broadcasts a Wi-Fi network but doesn't provide WiFi internet access.
                   <br />
                   <br />
-                  Please switch to <strong>Home Network Mode</strong> in Network Settings to download ZIM files.
+                  If you have <strong>Ethernet connectivity</strong>, downloads will work fine. Otherwise, switch to <strong>Home Network Mode</strong> to download ZIM files over WiFi.
                 </>
               ) : (
                 <>
@@ -313,7 +296,7 @@ export default function ZIMImport() {
                 marginTop: '0.75rem',
                 padding: '0.5rem 1rem',
                 background: 'white',
-                color: networkMode === 'hotspot' ? '#cc0000' : 'var(--warning)',
+                color: 'var(--warning)',
                 border: 'none',
                 borderRadius: '4px',
                 fontWeight: 'bold',
