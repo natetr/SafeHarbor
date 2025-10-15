@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # SafeHarbor Permission Fix Script
-# Fixes common permission and systemd service issues after updates
+# Handles dev-to-production transition and fixes permission issues
 
 set -e
 
@@ -17,6 +17,35 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 INSTALL_DIR="/opt/safeharbor"
+CURRENT_USER="${SUDO_USER:-$USER}"
+
+# Detect if we're transitioning from dev to production
+if [ -d "$INSTALL_DIR" ]; then
+  DB_OWNER=$(stat -c '%U' "${INSTALL_DIR}/safeharbor.db" 2>/dev/null || stat -f '%Su' "${INSTALL_DIR}/safeharbor.db" 2>/dev/null || echo "unknown")
+
+  if [ "$DB_OWNER" != "safeharbor" ] && [ "$DB_OWNER" != "root" ] && [ "$DB_OWNER" != "unknown" ]; then
+    echo "⚠️  Detected development installation (owned by $DB_OWNER)"
+    echo "   This script will transition to production mode (systemd service)"
+    echo ""
+    read -p "Continue? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      echo "Aborted."
+      exit 0
+    fi
+    echo ""
+    echo "Transitioning from dev to production mode..."
+    DEV_TO_PROD=true
+  else
+    echo "Detected production installation"
+    DEV_TO_PROD=false
+  fi
+else
+  echo "Fresh installation detected"
+  DEV_TO_PROD=false
+fi
+
+echo ""
 
 echo "Fixing directory permissions..."
 
@@ -53,6 +82,18 @@ chmod 755 ${INSTALL_DIR}
 chmod -R u+w ${INSTALL_DIR}
 
 echo "✓ Directory permissions set"
+
+# Stop any manually running instances if transitioning to production
+if [ "$DEV_TO_PROD" = true ]; then
+  echo ""
+  echo "Stopping any manually running instances..."
+
+  # Kill any node processes running SafeHarbor
+  pkill -f "node.*server/index.js" || true
+  pkill -f "nodemon.*server/index.js" || true
+
+  echo "✓ Stopped manual instances"
+fi
 
 # Fix systemd service file
 SERVICE_FILE="/etc/systemd/system/safeharbor.service"
@@ -106,9 +147,32 @@ echo "================================"
 echo "Permission Fix Complete!"
 echo "================================"
 echo ""
-echo "You can now start the service with:"
-echo "  sudo systemctl start safeharbor"
-echo ""
-echo "Or restart it with:"
-echo "  sudo systemctl restart safeharbor"
+
+if [ "$DEV_TO_PROD" = true ]; then
+  echo "✅ Successfully transitioned to production mode!"
+  echo ""
+  echo "The system is now configured to:"
+  echo "  - Run as systemd service (starts automatically on boot)"
+  echo "  - Run as 'safeharbor' user (not your personal account)"
+  echo "  - Store data in /opt/safeharbor"
+  echo ""
+  echo "To manage the service:"
+  echo "  Start:   sudo systemctl start safeharbor"
+  echo "  Stop:    sudo systemctl stop safeharbor"
+  echo "  Restart: sudo systemctl restart safeharbor"
+  echo "  Status:  sudo systemctl status safeharbor"
+  echo "  Logs:    sudo journalctl -u safeharbor -f"
+  echo ""
+  echo "Starting the service now..."
+  systemctl start safeharbor
+  echo ""
+  echo "Service started! Check status with:"
+  echo "  sudo systemctl status safeharbor"
+else
+  echo "You can now start the service with:"
+  echo "  sudo systemctl start safeharbor"
+  echo ""
+  echo "Or restart it with:"
+  echo "  sudo systemctl restart safeharbor"
+fi
 echo ""
