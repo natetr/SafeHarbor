@@ -42,6 +42,11 @@ safeharbor ALL=(ALL) NOPASSWD: /bin/mount
 safeharbor ALL=(ALL) NOPASSWD: /bin/umount
 safeharbor ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl
 safeharbor ALL=(ALL) NOPASSWD: /bin/cp
+safeharbor ALL=(ALL) NOPASSWD: /bin/rm
+safeharbor ALL=(ALL) NOPASSWD: /sbin/rfkill
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/rfkill
+safeharbor ALL=(ALL) NOPASSWD: /sbin/iw
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/iw
 EOF
 
 chmod 440 /etc/sudoers.d/safeharbor

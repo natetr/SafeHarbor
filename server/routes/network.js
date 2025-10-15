@@ -202,6 +202,57 @@ router.get('/status', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Helper function to ensure NetworkManager is configured properly
+async function ensureNetworkManagerConfigured() {
+  try {
+    // Check if NetworkManager is running
+    try {
+      await execAsync('systemctl is-active NetworkManager');
+    } catch (err) {
+      // NetworkManager not running, nothing to configure
+      return;
+    }
+
+    const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
+    const NM_CONFIG_DIR = '/etc/NetworkManager/conf.d';
+    const NM_CONFIG_FILE = `${NM_CONFIG_DIR}/99-unmanaged-devices.conf`;
+
+    // Check if configuration directory exists
+    try {
+      await execAsync(`test -d ${NM_CONFIG_DIR}`);
+    } catch (err) {
+      console.log('NetworkManager conf.d directory not found');
+      return;
+    }
+
+    // Check if config already exists
+    try {
+      await execAsync(`test -f ${NM_CONFIG_FILE}`);
+      // Config already exists, reload NetworkManager
+      await execAsync('sudo systemctl reload NetworkManager');
+      return;
+    } catch (err) {
+      // Config doesn't exist, create it
+    }
+
+    // Create NetworkManager configuration to ignore wlan0
+    const nmConfig = `[keyfile]
+unmanaged-devices=interface-name:${INTERFACE}
+`;
+
+    fs.writeFileSync('/tmp/99-unmanaged-devices.conf', nmConfig);
+    await execAsync(`sudo cp /tmp/99-unmanaged-devices.conf ${NM_CONFIG_FILE}`);
+    await execAsync('sudo rm /tmp/99-unmanaged-devices.conf');
+
+    // Reload NetworkManager to apply configuration
+    await execAsync('sudo systemctl reload NetworkManager');
+
+    console.log(`NetworkManager configured to ignore ${INTERFACE}`);
+  } catch (err) {
+    console.warn('Warning: Could not configure NetworkManager:', err.message);
+  }
+}
+
 // Helper function to configure Avahi hostname for custom domain broadcasting
 async function configureAvahiHostname(domain) {
   try {
@@ -311,12 +362,9 @@ address=/#/192.168.4.1
 
   fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
 
-  // Stop NetworkManager
-  try {
-    await execAsync('sudo systemctl stop NetworkManager');
-  } catch (err) {
-    console.log('NetworkManager already stopped or not present');
-  }
+  // Ensure NetworkManager is configured to ignore wlan0
+  // (Don't stop it completely - that breaks ethernet!)
+  await ensureNetworkManagerConfigured();
 
   // Configure interface
   await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
@@ -354,10 +402,12 @@ async function applyHomeNetworkConfig(config) {
 
   console.log(`Attempting to connect to home network: ${config.home_network_ssid}`);
 
-  // Stop hotspot services
+  // Stop hotspot services and clean up
   try {
     await execAsync('sudo killall hostapd || true');
     await execAsync('sudo killall dnsmasq || true');
+    await execAsync('sudo killall wpa_supplicant || true');
+    await execAsync('sudo killall dhclient || true');
   } catch (err) {
     // Services already stopped
   }
@@ -374,20 +424,43 @@ async function applyHomeNetworkConfig(config) {
   await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
   await execAsync(`sudo ip link set ${INTERFACE} down`);
 
-  // Create wpa_supplicant configuration
-  const wpaConf = `
+  // Wait for interface to fully reset
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  try {
+    // Unblock WiFi radio (in case it was blocked)
+    try {
+      await execAsync('sudo rfkill unblock wifi');
+      console.log('WiFi radio unblocked');
+    } catch (err) {
+      // rfkill might not be available, continue anyway
+    }
+
+    // Set interface to managed mode (station mode, not AP mode)
+    try {
+      await execAsync(`sudo iw dev ${INTERFACE} set type managed`);
+      console.log('Interface set to managed (station) mode');
+    } catch (err) {
+      // Interface might already be in managed mode
+      console.log('Interface mode: ' + err.message);
+    }
+
+    // Bring interface up
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
+
+    // Wait for interface to be fully up
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Create wpa_supplicant configuration with properly quoted password
+    const wpaConf = `
 network={
     ssid="${config.home_network_ssid}"
     psk="${config.home_network_password}"
+    key_mgmt=WPA-PSK
 }
 `;
 
-  fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
-
-  try {
-    // Connect to network
-    await execAsync(`sudo ip link set ${INTERFACE} up`);
-    await execAsync(`sudo killall wpa_supplicant || true`);
+    fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
 
     // Start wpa_supplicant
     await execAsync(`sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf`);
@@ -455,6 +528,9 @@ network={
     } catch (cleanupErr) {
       console.warn('Warning during cleanup:', cleanupErr.message);
     }
+
+    // Wait for cleanup to complete before starting fallback
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Update database to revert to hotspot mode
     await safeDbRun(
