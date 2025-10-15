@@ -23,6 +23,7 @@ Description=SafeHarbor - Offline Knowledge Hub
 Documentation=https://github.com/natetr/SafeHarbor
 After=network.target
 Wants=network-online.target
+StartLimitIntervalSec=600
 
 [Service]
 Type=simple
@@ -54,7 +55,6 @@ RestartSec=10
 # Restart throttling - prevent restart loops
 # Max 5 restarts within 10 minutes, then give up
 StartLimitBurst=5
-StartLimitIntervalSec=600
 
 # Don't restart if app exits with these codes (intentional shutdown)
 RestartPreventExitStatus=0 2
@@ -84,7 +84,7 @@ PrivateTmp=true
 # Protect system directories
 ProtectSystem=strict
 # Allow writing to these directories
-ReadWritePaths=/home/pi/SafeHarbor /var/safeharbor /var/log/safeharbor /tmp
+ReadWritePaths=/opt/safeharbor /var/safeharbor /var/log/safeharbor /tmp
 
 # Protect home directory (except our working directory)
 ProtectHome=read-only
