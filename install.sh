@@ -151,10 +151,12 @@ fi
 echo "Creating directories..."
 mkdir -p /var/safeharbor/{data,content,zim}
 mkdir -p /var/log/safeharbor
+mkdir -p /opt/safeharbor/{data,content,zim}
 
 # Set ownership
 chown -R safeharbor:safeharbor /var/safeharbor
 chown -R safeharbor:safeharbor /var/log/safeharbor
+chown -R safeharbor:safeharbor /opt/safeharbor
 
 # Copy application files
 echo "Installing application..."
