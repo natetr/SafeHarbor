@@ -5,6 +5,12 @@ import { authenticateToken, requireAdmin } from '../middleware/auth.js';
 import db, { safeDbGet, safeDbRun } from '../database/init.js';
 import fs from 'fs';
 import { detectPlatform, canConfigureNetwork } from '../utils/platformDetection.js';
+import {
+  writeNetworkState,
+  clearNetworkState,
+  startNetworkWatchdog,
+  stopNetworkWatchdog
+} from '../utils/networkRecovery.js';
 
 const router = express.Router();
 const execAsync = promisify(exec);
@@ -124,13 +130,43 @@ router.post('/apply', authenticateToken, requireAdmin, async (req, res) => {
 
     console.log(`Applying network configuration: ${config.mode} mode`);
 
+    let watchdogTimer = null;
+
+    // Get current mode before switching (opposite of target mode)
+    const currentMode = config.mode === 'hotspot' ? 'home' : 'hotspot';
+
+    // Write network transition state
+    await writeNetworkState({
+      status: 'transitioning',
+      fromMode: currentMode,
+      toMode: config.mode,
+      config: config
+    });
+
+    // Start watchdog timer for automatic recovery
+    watchdogTimer = startNetworkWatchdog(60000); // 60 second timeout
+
     if (config.mode === 'hotspot') {
       await applyHotspotConfig(config);
+
+      // Stop watchdog and clear state on success
+      stopNetworkWatchdog(watchdogTimer);
+      await clearNetworkState();
+
       res.json({ message: 'Hotspot mode applied successfully' });
     } else if (config.mode === 'home') {
       await applyHomeNetworkConfig(config);
+
+      // Stop watchdog and clear state on success
+      stopNetworkWatchdog(watchdogTimer);
+      await clearNetworkState();
+
       res.json({ message: 'Home network mode applied successfully' });
     } else {
+      // Stop watchdog and clear state
+      stopNetworkWatchdog(watchdogTimer);
+      await clearNetworkState();
+
       res.status(400).json({ error: 'Invalid network mode' });
     }
   } catch (err) {
@@ -394,6 +430,24 @@ address=/#/192.168.4.1
   }
 }
 
+// Helper function to check ethernet connectivity
+async function checkEthernetConnectivity() {
+  try {
+    const { stdout } = await execAsync('ip addr show eth0 2>/dev/null');
+    if (stdout && stdout.includes('state UP')) {
+      const ipMatch = stdout.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+      if (ipMatch) {
+        console.log(`✓ Ethernet is active with IP: ${ipMatch[1]}`);
+        return { connected: true, ip: ipMatch[1] };
+      }
+    }
+  } catch (err) {
+    // eth0 might not exist
+  }
+  console.log('✗ Ethernet is not connected');
+  return { connected: false, ip: null };
+}
+
 // Helper function to apply home network configuration with automatic fallback
 async function applyHomeNetworkConfig(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
@@ -401,6 +455,9 @@ async function applyHomeNetworkConfig(config) {
   const VALIDATION_TIMEOUT = 15000; // 15 seconds to validate connection
 
   console.log(`Attempting to connect to home network: ${config.home_network_ssid}`);
+
+  // Check ethernet status before making changes
+  const ethernetBefore = await checkEthernetConnectivity();
 
   // Stop hotspot services and clean up
   try {
@@ -412,12 +469,20 @@ async function applyHomeNetworkConfig(config) {
     // Services already stopped
   }
 
-  // Flush iptables rules
+  // Flush only wlan0-related iptables rules to preserve ethernet connectivity
   try {
-    await execAsync('sudo iptables -t nat -F');
-    await execAsync('sudo iptables -F');
+    // Save current iptables rules for potential recovery
+    const { stdout: natRules } = await execAsync('sudo iptables-save -t nat');
+    const { stdout: filterRules } = await execAsync('sudo iptables-save -t filter');
+
+    // Only remove rules related to wlan0, preserve eth0 rules
+    await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
+    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
+    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
+
+    console.log('Cleaned up wlan0-specific iptables rules (preserving ethernet)');
   } catch (err) {
-    console.log('Failed to flush iptables');
+    console.log('Warning: Could not clean up iptables rules:', err.message);
   }
 
   // Reset interface
@@ -515,6 +580,12 @@ network={
     }
 
     console.log(`✓ Successfully connected to home network: ${config.home_network_ssid}`);
+
+    // Verify ethernet is still working after network switch
+    const ethernetAfter = await checkEthernetConnectivity();
+    if (ethernetBefore.connected && !ethernetAfter.connected) {
+      console.warn('⚠️  Warning: Ethernet connectivity was lost during network switch!');
+    }
 
   } catch (err) {
     console.error(`✗ Failed to connect to home network: ${err.message}`);

@@ -256,12 +256,14 @@ address=/#/192.168.4.1
 
   fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
 
-  // Flush iptables
+  // Clean up any existing wlan0-related iptables rules (preserve ethernet connectivity)
   try {
-    await execAsync('sudo iptables -t nat -F');
-    await execAsync('sudo iptables -F');
+    await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
+    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
+    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
+    console.log('  Cleaned up existing NAT rules');
   } catch (err) {
-    console.warn('Warning: Could not flush iptables');
+    console.warn('  Warning: Could not clean up iptables rules');
   }
 
   // Configure interface
@@ -307,9 +309,10 @@ async function applyHomeNetworkMode(config) {
     await execAsync('sudo killall wpa_supplicant || true');
     await execAsync('sudo killall dhclient || true');
 
-    // Flush iptables
-    await execAsync('sudo iptables -t nat -F');
-    await execAsync('sudo iptables -F');
+    // Flush only wlan0-related iptables rules to preserve ethernet connectivity
+    await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
+    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
+    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
 
     // Reset interface
     await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
