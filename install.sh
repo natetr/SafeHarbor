@@ -222,6 +222,39 @@ else
   echo "✓ .env file already exists, skipping"
 fi
 
+# Add safeharbor user to necessary groups (do this before creating sudoers file)
+usermod -a -G netdev safeharbor
+usermod -a -G sudo safeharbor
+
+# Create sudoers file for network management
+# SECURITY NOTE: The safeharbor service requires sudo access to configure network settings
+# (hotspot mode, home network switching, etc.). To minimize security risks:
+#   1. NoNewPrivileges is disabled in the systemd service (required for sudo to work)
+#   2. Sudo access is limited to ONLY the specific commands below (no password required)
+#   3. The service runs as a non-root user (safeharbor)
+#   4. Only admin users authenticated via JWT can trigger network changes
+echo "Configuring sudo permissions for network management..."
+cat > /etc/sudoers.d/safeharbor <<EOF
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/hostapd
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/dnsmasq
+safeharbor ALL=(ALL) NOPASSWD: /sbin/ip
+safeharbor ALL=(ALL) NOPASSWD: /sbin/iptables
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_supplicant
+safeharbor ALL=(ALL) NOPASSWD: /sbin/wpa_cli
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_cli
+safeharbor ALL=(ALL) NOPASSWD: /sbin/dhclient
+safeharbor ALL=(ALL) NOPASSWD: /bin/systemctl
+safeharbor ALL=(ALL) NOPASSWD: /sbin/reboot
+safeharbor ALL=(ALL) NOPASSWD: /sbin/shutdown
+safeharbor ALL=(ALL) NOPASSWD: /usr/bin/killall
+safeharbor ALL=(ALL) NOPASSWD: /bin/mount
+safeharbor ALL=(ALL) NOPASSWD: /bin/umount
+safeharbor ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl
+safeharbor ALL=(ALL) NOPASSWD: /bin/cp
+EOF
+
+chmod 440 /etc/sudoers.d/safeharbor
+
 # Create systemd service with enhanced crash recovery
 echo "Creating systemd service..."
 cat > /etc/systemd/system/safeharbor.service <<'EOF'
@@ -254,9 +287,6 @@ RestartPreventExitStatus=0 2
 
 # Graceful shutdown - give app 30s to clean up before SIGKILL
 TimeoutStopSec=30
-
-# Startup timeout - give app 3 minutes to initialize database and start
-TimeoutStartSec=180
 
 # Resource limits
 LimitNOFILE=65536
@@ -295,26 +325,14 @@ systemctl enable safeharbor
 echo "Starting SafeHarbor service to initialize database..."
 systemctl start safeharbor
 
-# Wait for the database to be created with better progress indication
+# Wait for the database to be created
 echo "Waiting for database initialization..."
-WAIT_COUNT=0
-MAX_WAIT=30  # Wait up to 30 seconds
-
-while [ ! -f "${INSTALL_DIR}/safeharbor.db" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
-  sleep 1
-  WAIT_COUNT=$((WAIT_COUNT + 1))
-  echo -n "."
-done
-echo ""
+sleep 3
 
 # Check if database was created
 if [ ! -f "${INSTALL_DIR}/safeharbor.db" ]; then
-  echo "⚠️  Database still not found after ${MAX_WAIT} seconds"
-  echo "   Checking service status..."
-  systemctl status safeharbor --no-pager -l
-  echo ""
-  echo "   Check logs with: sudo journalctl -u safeharbor -n 50"
-  echo ""
+  echo "⚠️  Database not found, waiting longer..."
+  sleep 5
 fi
 
 if [ -f "${INSTALL_DIR}/safeharbor.db" ]; then
@@ -358,38 +376,6 @@ iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
 
 # Save iptables rules
 iptables-save > /etc/iptables/rules.v4 || true
-
-# Add safeharbor user to necessary groups
-usermod -a -G netdev safeharbor
-usermod -a -G sudo safeharbor
-
-# Create sudoers file for network management
-# SECURITY NOTE: The safeharbor service requires sudo access to configure network settings
-# (hotspot mode, home network switching, etc.). To minimize security risks:
-#   1. NoNewPrivileges is disabled in the systemd service (required for sudo to work)
-#   2. Sudo access is limited to ONLY the specific commands below (no password required)
-#   3. The service runs as a non-root user (safeharbor)
-#   4. Only admin users authenticated via JWT can trigger network changes
-cat > /etc/sudoers.d/safeharbor <<EOF
-safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/hostapd
-safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/dnsmasq
-safeharbor ALL=(ALL) NOPASSWD: /sbin/ip
-safeharbor ALL=(ALL) NOPASSWD: /sbin/iptables
-safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_supplicant
-safeharbor ALL=(ALL) NOPASSWD: /sbin/wpa_cli
-safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_cli
-safeharbor ALL=(ALL) NOPASSWD: /sbin/dhclient
-safeharbor ALL=(ALL) NOPASSWD: /bin/systemctl
-safeharbor ALL=(ALL) NOPASSWD: /sbin/reboot
-safeharbor ALL=(ALL) NOPASSWD: /sbin/shutdown
-safeharbor ALL=(ALL) NOPASSWD: /usr/bin/killall
-safeharbor ALL=(ALL) NOPASSWD: /bin/mount
-safeharbor ALL=(ALL) NOPASSWD: /bin/umount
-safeharbor ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl
-safeharbor ALL=(ALL) NOPASSWD: /bin/cp
-EOF
-
-chmod 440 /etc/sudoers.d/safeharbor
 
 # Configure NetworkManager to not interfere with wlan0
 # SafeHarbor manages wlan0 directly for hotspot and home network modes
