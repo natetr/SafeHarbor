@@ -292,26 +292,52 @@ EOF
 systemctl daemon-reload
 systemctl enable safeharbor
 
-# Run first-time setup wizard
-echo ""
-echo "================================"
-echo "First-Time Setup"
-echo "================================"
-echo ""
+# Start the service first to initialize the database
+echo "Starting SafeHarbor service to initialize database..."
+systemctl start safeharbor
 
-if [ -f "$(dirname "$0")/scripts/first-run-setup.sh" ]; then
-  bash "$(dirname "$0")/scripts/first-run-setup.sh" || true
-elif [ -f "${INSTALL_DIR}/scripts/first-run-setup.sh" ]; then
-  bash "${INSTALL_DIR}/scripts/first-run-setup.sh" || true
-else
-  echo "⚠️  First-run setup wizard not found"
-  echo "   You can configure WiFi settings later in the Admin Panel"
-  echo ""
+# Wait for the database to be created
+echo "Waiting for database initialization..."
+sleep 3
+
+# Check if database was created
+if [ ! -f "${INSTALL_DIR}/safeharbor.db" ]; then
+  echo "⚠️  Database not found, waiting longer..."
+  sleep 5
 fi
 
-# Start the service
-echo "Starting SafeHarbor service..."
-systemctl start safeharbor
+if [ -f "${INSTALL_DIR}/safeharbor.db" ]; then
+  echo "✓ Database initialized"
+
+  # Stop the service temporarily to configure network settings
+  echo "Stopping service for configuration..."
+  systemctl stop safeharbor
+
+  # Run first-time setup wizard
+  echo ""
+  echo "================================"
+  echo "First-Time Setup"
+  echo "================================"
+  echo ""
+
+  if [ -f "$(dirname "$0")/scripts/first-run-setup.sh" ]; then
+    bash "$(dirname "$0")/scripts/first-run-setup.sh" || true
+  elif [ -f "${INSTALL_DIR}/scripts/first-run-setup.sh" ]; then
+    bash "${INSTALL_DIR}/scripts/first-run-setup.sh" || true
+  else
+    echo "⚠️  First-run setup wizard not found"
+    echo "   You can configure WiFi settings later in the Admin Panel"
+    echo ""
+  fi
+
+  # Restart the service with the new configuration
+  echo "Restarting SafeHarbor service..."
+  systemctl start safeharbor
+else
+  echo "⚠️  Could not initialize database"
+  echo "   Check logs with: sudo journalctl -u safeharbor -n 50"
+  echo ""
+fi
 
 # Configure firewall
 echo "Configuring firewall..."
