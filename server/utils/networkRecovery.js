@@ -232,6 +232,8 @@ rsn_pairwise=CCMP`}
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
+dhcp-leasefile=/tmp/dnsmasq_recovery.leases
+pid-file=/tmp/dnsmasq_recovery.pid
 address=/${config.hotspot_domain || 'safeharbor.local'}/192.168.4.1
 `;
 
