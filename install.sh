@@ -98,10 +98,11 @@ if [ -n "$KIWIX_ARCH" ]; then
 fi
 
 # Stop services that will be configured later
-systemctl stop hostapd || true
-systemctl stop dnsmasq || true
-systemctl disable hostapd || true
-systemctl disable dnsmasq || true
+# Suppress warnings about masked/disabled units
+systemctl stop hostapd 2>/dev/null || true
+systemctl stop dnsmasq 2>/dev/null || true
+systemctl disable hostapd 2>/dev/null || true
+systemctl disable dnsmasq 2>/dev/null || true
 
 # Configure hostname to safeharbor
 echo "Configuring hostname..."
@@ -183,14 +184,42 @@ cd client && sudo -u safeharbor npm run build && cd ..
 # Create environment file
 if [ ! -f "$INSTALL_DIR/.env" ]; then
   echo "Creating .env file..."
-  cp .env.example .env
+
+  # Check if .env.example exists in the source directory
+  SOURCE_DIR="$(dirname "$0")"
+  if [ -f "$SOURCE_DIR/.env.example" ]; then
+    cp "$SOURCE_DIR/.env.example" "$INSTALL_DIR/.env"
+  elif [ -f "$INSTALL_DIR/.env.example" ]; then
+    cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
+  else
+    echo "Warning: .env.example not found, creating minimal .env file..."
+    cat > "$INSTALL_DIR/.env" <<'EOF'
+PORT=3000
+NODE_ENV=production
+JWT_SECRET=change-this-to-a-random-secret-key
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin
+DATA_DIR=/var/safeharbor/data
+CONTENT_DIR=/var/safeharbor/content
+ZIM_DIR=/var/safeharbor/zim
+DATABASE_PATH=/opt/safeharbor/safeharbor.db
+KIWIX_SERVE_PORT=8080
+ZIM_LOG_LEVEL=basic
+HOTSPOT_SSID=SafeHarbor
+HOTSPOT_PASSWORD=safeharbor2024
+NETWORK_INTERFACE=wlan0
+EOF
+  fi
 
   # Generate random JWT secret
   JWT_SECRET=$(openssl rand -hex 32)
-  sed -i "s/change-this-to-a-random-secret-key/$JWT_SECRET/" .env
+  sed -i "s/change-this-to-a-random-secret-key/$JWT_SECRET/" "$INSTALL_DIR/.env"
 
-  chown safeharbor:safeharbor .env
-  chmod 600 .env
+  chown safeharbor:safeharbor "$INSTALL_DIR/.env"
+  chmod 600 "$INSTALL_DIR/.env"
+  echo "✓ .env file created with random JWT secret"
+else
+  echo "✓ .env file already exists, skipping"
 fi
 
 # Create systemd service with enhanced crash recovery
