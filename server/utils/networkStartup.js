@@ -318,6 +318,7 @@ max_num_sta=${config.connection_limit || 10}
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
+dhcp-leasefile=/tmp/dnsmasq.leases
 
 # Main domain resolution
 address=/${hotspotDomain}/192.168.4.1
