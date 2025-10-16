@@ -308,8 +308,8 @@ PrivateTmp=true
 
 # Protect system directories
 ProtectSystem=strict
-# Allow writing to these directories
-ReadWritePaths=/opt/safeharbor /var/safeharbor /var/log/safeharbor /tmp
+# Allow writing to these directories (including /run/sudo for passwordless sudo)
+ReadWritePaths=/opt/safeharbor /var/safeharbor /var/log/safeharbor /tmp /run/sudo
 
 # Protect home directory
 ProtectHome=read-only
