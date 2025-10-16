@@ -225,9 +225,14 @@ async function performHealthCheck(restartKiwixCallback) {
     });
   }
 
-  // Check 4: Kiwix-serve process
+  // Check 4: Kiwix-serve process (only critical if ZIM files exist)
   try {
     const start = Date.now();
+
+    // First, check if we have any active ZIM files
+    const activeZims = db.prepare('SELECT COUNT(*) as count FROM zim_libraries WHERE hidden = 0').get();
+    const hasZims = activeZims && activeZims.count > 0;
+
     // Check if process is listening on the Kiwix port
     const output = execSync(`lsof -ti:${KIWIX_PORT} 2>/dev/null || echo "none"`, {
       encoding: 'utf8',
@@ -237,36 +242,42 @@ async function performHealthCheck(restartKiwixCallback) {
     const duration = Date.now() - start;
 
     if (output === 'none' || output === '') {
-      const issue = {
-        type: 'kiwix',
-        severity: 'critical',
-        message: 'Kiwix-serve not running',
-        value: { port: KIWIX_PORT }
-      };
-      issues.push(issue);
+      // Only treat as critical if we have ZIM files that should be served
+      if (hasZims) {
+        const issue = {
+          type: 'kiwix',
+          severity: 'critical',
+          message: 'Kiwix-serve not running',
+          value: { port: KIWIX_PORT, zimCount: activeZims.count }
+        };
+        issues.push(issue);
 
-      // Log critical kiwix issue
-      await zimLogger.health.logCritical({
-        issueType: 'kiwix_down',
-        details: `Kiwix-serve process not found on port ${KIWIX_PORT}`,
-        errorMessage: issue.message
-      });
+        // Log critical kiwix issue
+        await zimLogger.health.logCritical({
+          issueType: 'kiwix_down',
+          details: `Kiwix-serve process not found on port ${KIWIX_PORT} (${activeZims.count} ZIM file(s) should be served)`,
+          errorMessage: issue.message
+        });
 
-      // Attempt recovery: restart kiwix-serve
-      if (restartKiwixCallback) {
-        console.log('🔄 Attempting to restart kiwix-serve...');
-        try {
-          restartKiwixCallback();
-          recoveryAttempted = true;
+        // Attempt recovery: restart kiwix-serve
+        if (restartKiwixCallback) {
+          console.log('🔄 Attempting to restart kiwix-serve...');
+          try {
+            restartKiwixCallback();
+            recoveryAttempted = true;
 
-          // Log recovery attempt
-          await zimLogger.health.logRecovery({
-            action: 'restart_kiwix',
-            details: 'Automatically restarting kiwix-serve after process down detection'
-          });
-        } catch (err) {
-          console.error('Failed to restart kiwix-serve:', err.message);
+            // Log recovery attempt
+            await zimLogger.health.logRecovery({
+              action: 'restart_kiwix',
+              details: 'Automatically restarting kiwix-serve after process down detection'
+            });
+          } catch (err) {
+            console.error('Failed to restart kiwix-serve:', err.message);
+          }
         }
+      } else {
+        // No ZIM files - kiwix not running is expected and normal
+        console.log('ℹ️  Kiwix-serve not running (no ZIM files to serve - this is normal)');
       }
     }
   } catch (err) {
@@ -467,18 +478,36 @@ export async function checkHealth() {
     health.status = 'unhealthy';
   }
 
-  // Quick kiwix check
+  // Quick kiwix check (only relevant if ZIMs exist)
   try {
+    const activeZims = db.prepare('SELECT COUNT(*) as count FROM zim_libraries WHERE hidden = 0').get();
+    const hasZims = activeZims && activeZims.count > 0;
+
     const output = execSync(`lsof -ti:${KIWIX_PORT} 2>/dev/null || echo "none"`, {
       encoding: 'utf8',
       timeout: 1000
     }).trim();
-    health.checks.kiwix = {
-      status: (output !== 'none' && output !== '') ? 'ok' : 'down',
-      port: KIWIX_PORT
-    };
-    if (health.checks.kiwix.status === 'down') {
-      health.status = 'degraded';
+
+    const isRunning = (output !== 'none' && output !== '');
+
+    if (hasZims) {
+      // ZIMs exist - kiwix should be running
+      health.checks.kiwix = {
+        status: isRunning ? 'ok' : 'down',
+        port: KIWIX_PORT,
+        zimCount: activeZims.count
+      };
+      if (!isRunning) {
+        health.status = 'degraded';
+      }
+    } else {
+      // No ZIMs - kiwix not running is normal
+      health.checks.kiwix = {
+        status: 'not_needed',
+        port: KIWIX_PORT,
+        zimCount: 0,
+        note: 'No ZIM files to serve'
+      };
     }
   } catch (err) {
     health.checks.kiwix = { status: 'unknown', error: 'Cannot check process' };

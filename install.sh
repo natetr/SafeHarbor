@@ -251,6 +251,7 @@ safeharbor ALL=(ALL) NOPASSWD: /bin/mount
 safeharbor ALL=(ALL) NOPASSWD: /bin/umount
 safeharbor ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl
 safeharbor ALL=(ALL) NOPASSWD: /bin/cp
+safeharbor ALL=(ALL) NOPASSWD: /bin/chmod
 EOF
 
 chmod 440 /etc/sudoers.d/safeharbor
@@ -264,6 +265,11 @@ Documentation=https://github.com/natetr/SafeHarbor
 After=network.target
 Wants=network-online.target
 
+# Restart throttling - prevent restart loops
+# Max 5 restarts within 10 minutes, then give up
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
 [Service]
 Type=simple
 User=safeharbor
@@ -276,11 +282,6 @@ Environment=NODE_ENV=production
 # Restart policy - only restart on failure, not on intentional exit
 Restart=on-failure
 RestartSec=10
-
-# Restart throttling - prevent restart loops
-# Max 5 restarts within 10 minutes, then give up
-StartLimitBurst=5
-StartLimitIntervalSec=600
 
 # Don't restart if app exits with these codes (intentional shutdown)
 RestartPreventExitStatus=0 2

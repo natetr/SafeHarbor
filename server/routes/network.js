@@ -470,75 +470,94 @@ async function applyHomeNetworkConfig(config) {
     await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
     await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
 
-    // Remove NetworkManager unmanaged config so NetworkManager can manage wlan0
-    const nmConfigFiles = [
-      '/etc/NetworkManager/conf.d/99-unmanaged-devices.conf',
-      '/etc/NetworkManager/conf.d/safeharbor-unmanaged.conf'
-    ];
+    // Stop any wpa_supplicant/dhclient processes
+    await execAsync('sudo killall wpa_supplicant || true');
+    await execAsync('sudo killall dhclient || true');
 
-    for (const configFile of nmConfigFiles) {
-      try {
-        await execAsync(`sudo rm -f ${configFile}`);
-        console.log(`  Removed ${configFile}`);
-      } catch (err) {
-        // File might not exist
-      }
-    }
+    // Bring interface down cleanly
+    await execAsync(`sudo ip link set ${INTERFACE} down`);
+    await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
 
-    // Restart NetworkManager to pick up the config change
-    console.log('  Restarting NetworkManager...');
-    await execAsync('sudo systemctl restart NetworkManager');
+    // Create wpa_supplicant configuration
+    const wpaConf = `
+network={
+    ssid="${config.home_network_ssid}"
+    psk="${config.home_network_password}"
+    key_mgmt=WPA-PSK
+}
+`;
+    fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
+    await execAsync('sudo chmod 600 /tmp/wpa_supplicant.conf');
 
-    // Wait for NetworkManager to initialize
+    // Bring interface up
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
+
+    // Start wpa_supplicant
+    console.log(`  Connecting to "${config.home_network_ssid}"...`);
+    await execAsync(
+      `sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf -D nl80211,wext`
+    );
+
+    // Wait for connection
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // Use nmcli to connect to WiFi (this handles everything properly)
-    console.log(`  Connecting to "${config.home_network_ssid}"...`);
-
+    // Check if connected
     try {
-      // Try to connect using nmcli
-      await execAsync(
-        `sudo nmcli device wifi connect "${config.home_network_ssid}" password "${config.home_network_password}"`,
-        { timeout: 30000 }
-      );
-
+      const { stdout: wpaStatus } = await execAsync(`sudo wpa_cli -i ${INTERFACE} status`);
+      if (!wpaStatus.includes('wpa_state=COMPLETED')) {
+        throw new Error('WiFi connection not established');
+      }
       console.log('  ✓ WiFi connection established');
-
-      // Wait a moment for DHCP
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      // Verify we have an IP address
-      const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
-      const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
-
-      if (ipMatch) {
-        console.log(`  IP address: ${ipMatch[1]}`);
-      }
-
-      // Test connectivity (optional)
-      try {
-        await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
-        console.log('  Internet connectivity: ✓');
-      } catch (err) {
-        console.log('  Internet connectivity: Limited (local network only)');
-      }
-
-      console.log(`✓ Successfully connected to home network: ${config.home_network_ssid}`);
-
-      // Verify ethernet is still working after network switch
-      const ethernetAfter = await checkEthernetConnectivity();
-      if (ethernetBefore.connected && !ethernetAfter.connected) {
-        console.warn('⚠️  Warning: Ethernet connectivity was lost during network switch!');
-      }
-
-    } catch (connectErr) {
-      // nmcli connection failed
-      throw new Error(`Failed to connect to WiFi: ${connectErr.message}`);
+    } catch (err) {
+      throw new Error(`WiFi authentication failed: ${err.message}`);
     }
+
+    // Get IP address via DHCP
+    console.log('  Requesting IP address...');
+    await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: 15000 });
+
+    // Wait a moment for DHCP
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Verify we have an IP address
+    const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
+    const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+
+    if (ipMatch) {
+      console.log(`  IP address: ${ipMatch[1]}`);
+    }
+
+    // Test connectivity (optional)
+    try {
+      await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
+      console.log('  Internet connectivity: ✓');
+    } catch (err) {
+      console.log('  Internet connectivity: Limited (local network only)');
+    }
+
+    console.log(`✓ Successfully connected to home network: ${config.home_network_ssid}`);
+
+    // Verify ethernet is still working after network switch
+    const ethernetAfter = await checkEthernetConnectivity();
+    if (ethernetBefore.connected && !ethernetAfter.connected) {
+      console.warn('⚠️  Warning: Ethernet connectivity was lost during network switch!');
+    }
+
+    // Clean up temp file
+    await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
 
   } catch (err) {
     console.error(`✗ Failed to connect to home network: ${err.message}`);
     console.log('🔄 Falling back to hotspot mode...');
+
+    // Clean up on failure
+    try {
+      await execAsync('sudo killall wpa_supplicant || true');
+      await execAsync('sudo killall dhclient || true');
+      await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
+    } catch (cleanupErr) {
+      // Ignore cleanup errors
+    }
 
     // Update database to revert to hotspot mode
     await safeDbRun(
