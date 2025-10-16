@@ -154,78 +154,150 @@ async function checkRequiredTools() {
 
 /**
  * Configure NetworkManager to not interfere with wlan0
- * Uses configuration file instead of stopping the service to preserve ethernet
+ * This is set once during installation and never changed
+ * CRITICAL: Only reloads config, never restarts NetworkManager
  */
 async function configureNetworkManager() {
   try {
+    const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
+    const NM_CONFIG_FILE = '/etc/NetworkManager/conf.d/safeharbor-unmanaged.conf';
+
+    // Check if already configured
+    try {
+      await execAsync(`test -f ${NM_CONFIG_FILE}`);
+      console.log(`  NetworkManager already configured (${INTERFACE} unmanaged)`);
+      return; // Already configured, nothing to do
+    } catch (err) {
+      // File doesn't exist, need to configure
+    }
+
     // Check if NetworkManager is running
     try {
       await execAsync('systemctl is-active NetworkManager');
     } catch (err) {
-      // NetworkManager not running, no need to configure
       console.log('  NetworkManager not active, skipping configuration');
       return;
     }
 
-    const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
-    const NM_CONFIG_DIR = '/etc/NetworkManager/conf.d';
-    const NM_CONFIG_FILE = `${NM_CONFIG_DIR}/99-unmanaged-devices.conf`;
+    console.log(`  Configuring NetworkManager to ignore ${INTERFACE}...`);
 
-    console.log('Configuring NetworkManager to ignore ' + INTERFACE + '...');
-
-    // Check if configuration directory exists
-    try {
-      await execAsync(`test -d ${NM_CONFIG_DIR}`);
-    } catch (err) {
-      console.log('  NetworkManager conf.d directory not found, skipping');
-      return;
-    }
-
-    // Create NetworkManager configuration to ignore wlan0
+    // Create NetworkManager configuration to ignore wlan0 permanently
     // This allows ethernet and other interfaces to continue working
-    const nmConfig = `[keyfile]
+    const nmConfig = `# SafeHarbor Network Configuration
+# This file prevents NetworkManager from managing the wireless interface
+# SafeHarbor manages the interface directly for both hotspot and home network modes
+
+[keyfile]
 unmanaged-devices=interface-name:${INTERFACE}
 `;
 
     // Write config file
-    fs.writeFileSync('/tmp/99-unmanaged-devices.conf', nmConfig);
-    await execAsync(`sudo cp /tmp/99-unmanaged-devices.conf ${NM_CONFIG_FILE}`);
-    await execAsync('sudo rm /tmp/99-unmanaged-devices.conf');
+    fs.writeFileSync('/tmp/safeharbor-unmanaged.conf', nmConfig);
+    await execAsync(`sudo cp /tmp/safeharbor-unmanaged.conf ${NM_CONFIG_FILE}`);
+    await execAsync('sudo rm /tmp/safeharbor-unmanaged.conf');
 
-    // Reload NetworkManager to apply configuration
+    // Reload NetworkManager to apply configuration (NOT restart!)
     await execAsync('sudo systemctl reload NetworkManager');
 
-    console.log(`✓ NetworkManager configured to ignore ${INTERFACE}`);
-    console.log('  (Ethernet and other interfaces remain managed)');
+    console.log(`  ✓ NetworkManager configured to ignore ${INTERFACE}`);
+    console.log('    (Ethernet and other interfaces remain managed)');
   } catch (err) {
-    console.warn('Warning: Could not configure NetworkManager:', err.message);
+    console.warn('  Warning: Could not configure NetworkManager:', err.message);
     // Don't fail startup if this doesn't work
   }
 }
 
 /**
- * Apply hotspot mode configuration
+ * Select the best WiFi channel for hotspot mode
+ * Scans for least congested channel, falls back to safe defaults
+ */
+async function selectBestChannel(interface_name) {
+  try {
+    // Try to scan for available networks to detect channel congestion
+    const { stdout } = await execAsync(`sudo iw dev ${interface_name} scan 2>/dev/null || true`);
+
+    if (stdout) {
+      // Count networks on each channel
+      const channelCounts = { 1: 0, 6: 0, 11: 0 };
+      const channelMatches = stdout.matchAll(/DS Parameter set: channel (\d+)/g);
+
+      for (const match of channelMatches) {
+        const channel = parseInt(match[1]);
+        // Only count 2.4GHz channels (1-14)
+        if (channel >= 1 && channel <= 14) {
+          // Map to nearest standard channel (1, 6, or 11)
+          if (channel <= 3) channelCounts[1]++;
+          else if (channel >= 4 && channel <= 8) channelCounts[6]++;
+          else channelCounts[11]++;
+        }
+      }
+
+      // Find least congested channel
+      const bestChannel = Object.keys(channelCounts).reduce((a, b) =>
+        channelCounts[a] <= channelCounts[b] ? a : b
+      );
+
+      console.log(`  Channel usage: ch1=${channelCounts[1]}, ch6=${channelCounts[6]}, ch11=${channelCounts[11]}`);
+      return parseInt(bestChannel);
+    }
+  } catch (err) {
+    // Scanning not available or failed
+  }
+
+  // Default to channel 6 (most universally compatible)
+  return 6;
+}
+
+/**
+ * Validate that hostapd started successfully
+ */
+async function validateHostapd(interface_name) {
+  try {
+    // Check if hostapd process is running
+    const { stdout: pidOutput } = await execAsync('pidof hostapd');
+    if (!pidOutput.trim()) {
+      return false;
+    }
+
+    // Check if interface is in AP mode
+    const { stdout: iwOutput } = await execAsync(`iw dev ${interface_name} info`);
+    if (!iwOutput.includes('type AP')) {
+      console.warn('  Warning: Interface not in AP mode');
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Apply hotspot mode configuration with validation and monitoring
  */
 async function applyHotspotMode(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
 
-  // Stop any existing network services
   try {
+    // Stop any existing network services
+    console.log('  Stopping existing network services...');
     await execAsync('sudo killall hostapd || true');
     await execAsync('sudo killall dnsmasq || true');
     await execAsync('sudo killall wpa_supplicant || true');
     await execAsync('sudo killall dhclient || true');
-  } catch (err) {
-    // Services already stopped
-  }
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
-  // Create hostapd configuration
-  const hostapdConf = `
+    // Select best WiFi channel
+    const channel = await selectBestChannel(INTERFACE);
+    console.log(`  Using WiFi channel: ${channel}`);
+
+    // Create hostapd configuration
+    const hostapdConf = `
 interface=${INTERFACE}
 driver=nl80211
 ssid=${config.hotspot_ssid}
 hw_mode=g
-channel=7
+channel=${channel}
 wmm_enabled=0
 macaddr_acl=0
 auth_algs=1
@@ -238,11 +310,11 @@ rsn_pairwise=CCMP`}
 max_num_sta=${config.connection_limit || 10}
 `;
 
-  fs.writeFileSync('/tmp/hostapd.conf', hostapdConf);
+    fs.writeFileSync('/tmp/hostapd.conf', hostapdConf);
 
-  // Create dnsmasq configuration
-  const hotspotDomain = config.hotspot_domain || 'safeharbor.local';
-  const dnsmasqConf = `
+    // Create dnsmasq configuration
+    const hotspotDomain = config.hotspot_domain || 'safeharbor.local';
+    const dnsmasqConf = `
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
@@ -267,127 +339,189 @@ address=/connectivity-check.ubuntu.com/192.168.4.1
 address=/#/192.168.4.1
 `;
 
-  fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
+    fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
 
-  // Clean up any existing wlan0-related iptables rules (preserve ethernet connectivity)
-  try {
-    await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
-    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
-    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
-    console.log('  Cleaned up existing NAT rules');
+    // Clean up any existing wlan0-related iptables rules (preserve ethernet connectivity)
+    try {
+      await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
+      await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
+      await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
+    } catch (err) {
+      // Rules didn't exist, that's fine
+    }
+
+    // Configure interface
+    console.log('  Configuring wireless interface...');
+    await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
+    await execAsync(`sudo ip link set ${INTERFACE} down`);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    await execAsync(`sudo ip addr add 192.168.4.1/24 dev ${INTERFACE}`);
+
+    // Start hostapd
+    console.log('  Starting hostapd...');
+    await execAsync('sudo hostapd /tmp/hostapd.conf -B');
+
+    // Validate hostapd started successfully
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const hostapdRunning = await validateHostapd(INTERFACE);
+
+    if (!hostapdRunning) {
+      throw new Error('hostapd failed to start - check WiFi adapter compatibility');
+    }
+
+    console.log('  ✓ hostapd started successfully');
+
+    // Start dnsmasq
+    console.log('  Starting DNS/DHCP server...');
+    await execAsync('sudo dnsmasq -C /tmp/dnsmasq.conf');
+
+    // Validate dnsmasq started
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    try {
+      const { stdout } = await execAsync('pidof dnsmasq');
+      if (!stdout.trim()) {
+        throw new Error('dnsmasq failed to start');
+      }
+      console.log('  ✓ DNS/DHCP server started successfully');
+    } catch (err) {
+      throw new Error('dnsmasq failed to start - check configuration');
+    }
+
+    // Configure Avahi hostname
+    await configureAvahiHostname(config.hotspot_domain || 'safeharbor.local');
+
+    // Enable IP forwarding and NAT (if eth0 exists)
+    try {
+      await execAsync('echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null');
+      await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
+      await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
+      await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
+      console.log('  ✓ Internet sharing enabled (via Ethernet)');
+    } catch (err) {
+      console.log('  Internet sharing: Not available (no Ethernet connection)');
+    }
+
+    return true;
+
   } catch (err) {
-    console.warn('  Warning: Could not clean up iptables rules');
-  }
+    console.error('  Error configuring hotspot:', err.message);
 
-  // Configure interface
-  await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
-  await execAsync(`sudo ip addr add 192.168.4.1/24 dev ${INTERFACE}`);
-  await execAsync(`sudo ip link set ${INTERFACE} up`);
+    // Cleanup on failure
+    try {
+      await execAsync('sudo killall hostapd || true');
+      await execAsync('sudo killall dnsmasq || true');
+    } catch (cleanupErr) {
+      // Ignore cleanup errors
+    }
 
-  // Start hostapd
-  await execAsync('sudo hostapd /tmp/hostapd.conf -B');
-
-  // Wait a moment for hostapd to initialize
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // Start dnsmasq
-  await execAsync('sudo dnsmasq -C /tmp/dnsmasq.conf');
-
-  // Configure Avahi hostname
-  await configureAvahiHostname(config.hotspot_domain || 'safeharbor.local');
-
-  // Enable IP forwarding and NAT (if eth0 exists)
-  try {
-    await execAsync('echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null');
-    await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
-    await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
-    await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
-  } catch (err) {
-    // NAT setup skipped (no eth0)
+    throw err;
   }
 }
 
 /**
- * Apply home network mode configuration using NetworkManager
- * This is more reliable than manually running wpa_supplicant/dhclient
+ * Apply home network mode configuration using wpa_supplicant
+ * CRITICAL: Never restarts NetworkManager - preserves Ethernet connectivity
  */
 async function applyHomeNetworkMode(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
 
   try {
     console.log('  Switching to home network mode...');
+    console.log('  (Ethernet connectivity will be preserved)');
 
     // Stop hotspot services
     await execAsync('sudo killall hostapd || true');
     await execAsync('sudo killall dnsmasq || true');
+    await execAsync('sudo killall wpa_supplicant || true');
+    await execAsync('sudo killall dhclient || true');
 
     // Clean up wlan0-specific iptables rules (preserve ethernet)
     await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
     await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
     await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
 
-    // Remove NetworkManager unmanaged config so NetworkManager can manage wlan0
-    const nmConfigFiles = [
-      '/etc/NetworkManager/conf.d/99-unmanaged-devices.conf',
-      '/etc/NetworkManager/conf.d/safeharbor-unmanaged.conf'
-    ];
+    // Bring interface down cleanly
+    await execAsync(`sudo ip link set ${INTERFACE} down`);
+    await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
 
-    for (const configFile of nmConfigFiles) {
-      try {
-        await execAsync(`sudo rm -f ${configFile}`);
-        console.log(`  Removed ${configFile}`);
-      } catch (err) {
-        // File might not exist
-      }
-    }
+    // Create wpa_supplicant configuration
+    const wpaConf = `
+network={
+    ssid="${config.home_network_ssid}"
+    psk="${config.home_network_password}"
+    key_mgmt=WPA-PSK
+}
+`;
+    fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
+    await execAsync('sudo chmod 600 /tmp/wpa_supplicant.conf');
 
-    // Restart NetworkManager to pick up the config change
-    console.log('  Restarting NetworkManager...');
-    await execAsync('sudo systemctl restart NetworkManager');
+    // Bring interface up
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
 
-    // Wait for NetworkManager to initialize
+    // Start wpa_supplicant
+    console.log(`  Connecting to "${config.home_network_ssid}"...`);
+    await execAsync(
+      `sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf -D nl80211,wext`
+    );
+
+    // Wait for connection
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // Use nmcli to connect to WiFi (this handles everything properly)
-    console.log(`  Connecting to "${config.home_network_ssid}"...`);
-
+    // Check if connected
     try {
-      // Try to connect using nmcli
-      await execAsync(
-        `sudo nmcli device wifi connect "${config.home_network_ssid}" password "${config.home_network_password}"`,
-        { timeout: 30000 }
-      );
-
+      const { stdout: wpaStatus } = await execAsync(`sudo wpa_cli -i ${INTERFACE} status`);
+      if (!wpaStatus.includes('wpa_state=COMPLETED')) {
+        throw new Error('WiFi connection not established');
+      }
       console.log('  ✓ WiFi connection established');
-
-      // Wait a moment for DHCP
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      // Verify we have an IP address
-      const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
-      const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
-
-      if (ipMatch) {
-        console.log(`  IP address: ${ipMatch[1]}`);
-      }
-
-      // Test connectivity (optional)
-      try {
-        await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
-        console.log('  Internet connectivity: ✓');
-      } catch (err) {
-        console.log('  Internet connectivity: Limited (local network only)');
-      }
-
-      return true;
-
-    } catch (connectErr) {
-      // nmcli connection failed
-      throw new Error(`Failed to connect to WiFi: ${connectErr.message}`);
+    } catch (err) {
+      throw new Error(`WiFi authentication failed: ${err.message}`);
     }
+
+    // Get IP address via DHCP
+    console.log('  Requesting IP address...');
+    await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: 15000 });
+
+    // Wait for DHCP
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Verify we have an IP address
+    const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
+    const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+
+    if (ipMatch) {
+      console.log(`  IP address: ${ipMatch[1]}`);
+    } else {
+      throw new Error('Failed to obtain IP address');
+    }
+
+    // Test connectivity (optional)
+    try {
+      await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
+      console.log('  Internet connectivity: ✓');
+    } catch (err) {
+      console.log('  Internet connectivity: Limited (local network only)');
+    }
+
+    // Clean up temp file
+    await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
+
+    return true;
 
   } catch (err) {
     console.error(`  Error: ${err.message}`);
+
+    // Clean up on failure
+    try {
+      await execAsync('sudo killall wpa_supplicant || true');
+      await execAsync('sudo killall dhclient || true');
+      await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
+    } catch (cleanupErr) {
+      // Ignore cleanup errors
+    }
+
     return false;
   }
 }
