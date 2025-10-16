@@ -295,130 +295,86 @@ address=/#/192.168.4.1
 }
 
 /**
- * Apply home network mode configuration
+ * Apply home network mode configuration using NetworkManager
+ * This is more reliable than manually running wpa_supplicant/dhclient
  */
 async function applyHomeNetworkMode(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
-  const CONNECTION_TIMEOUT = 30000;
-  const VALIDATION_TIMEOUT = 15000;
 
   try {
+    console.log('  Switching to home network mode...');
+
     // Stop hotspot services
     await execAsync('sudo killall hostapd || true');
     await execAsync('sudo killall dnsmasq || true');
-    await execAsync('sudo killall wpa_supplicant || true');
-    await execAsync('sudo killall dhclient || true');
 
-    // Flush only wlan0-related iptables rules to preserve ethernet connectivity
+    // Clean up wlan0-specific iptables rules (preserve ethernet)
     await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
     await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
     await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
 
-    // Reset interface
-    await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
-    await execAsync(`sudo ip link set ${INTERFACE} down`);
+    // Remove NetworkManager unmanaged config so NetworkManager can manage wlan0
+    const nmConfigFiles = [
+      '/etc/NetworkManager/conf.d/99-unmanaged-devices.conf',
+      '/etc/NetworkManager/conf.d/safeharbor-unmanaged.conf'
+    ];
 
-    // Wait for interface to fully reset
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Unblock WiFi radio (in case it was blocked)
-    try {
-      await execAsync('sudo rfkill unblock wifi');
-      console.log('  WiFi radio unblocked');
-    } catch (err) {
-      // rfkill might not be available, continue anyway
-    }
-
-    // Set interface to managed mode (station mode, not AP mode)
-    try {
-      await execAsync(`sudo iw dev ${INTERFACE} set type managed`);
-      console.log('  Interface set to managed (station) mode');
-    } catch (err) {
-      // Interface might already be in managed mode
-      console.log('  Interface mode check: ' + err.message);
-    }
-
-    // Bring interface up
-    await execAsync(`sudo ip link set ${INTERFACE} up`);
-
-    // Wait for interface to be fully up
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Create wpa_supplicant configuration with properly quoted password
-    const wpaConf = `
-network={
-    ssid="${config.home_network_ssid}"
-    psk="${config.home_network_password}"
-    key_mgmt=WPA-PSK
-}
-`;
-
-    fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
-
-    // Start wpa_supplicant
-    await execAsync(`sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf`);
-
-    // Wait for connection
-    let connected = false;
-    const startTime = Date.now();
-
-    console.log('  Waiting for WiFi authentication...');
-
-    while (Date.now() - startTime < CONNECTION_TIMEOUT) {
+    for (const configFile of nmConfigFiles) {
       try {
-        const { stdout } = await execAsync(`sudo wpa_cli -i ${INTERFACE} status`);
-        if (stdout.includes('wpa_state=COMPLETED')) {
-          connected = true;
-          console.log('  ✓ WiFi authentication successful');
-          break;
-        }
+        await execAsync(`sudo rm -f ${configFile}`);
+        console.log(`  Removed ${configFile}`);
       } catch (err) {
-        // Not ready yet
+        // File might not exist
+      }
+    }
+
+    // Restart NetworkManager to pick up the config change
+    console.log('  Restarting NetworkManager...');
+    await execAsync('sudo systemctl restart NetworkManager');
+
+    // Wait for NetworkManager to initialize
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Use nmcli to connect to WiFi (this handles everything properly)
+    console.log(`  Connecting to "${config.home_network_ssid}"...`);
+
+    try {
+      // Try to connect using nmcli
+      await execAsync(
+        `sudo nmcli device wifi connect "${config.home_network_ssid}" password "${config.home_network_password}"`,
+        { timeout: 30000 }
+      );
+
+      console.log('  ✓ WiFi connection established');
+
+      // Wait a moment for DHCP
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Verify we have an IP address
+      const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
+      const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+
+      if (ipMatch) {
+        console.log(`  IP address: ${ipMatch[1]}`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Test connectivity (optional)
+      try {
+        await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
+        console.log('  Internet connectivity: ✓');
+      } catch (err) {
+        console.log('  Internet connectivity: Limited (local network only)');
+      }
+
+      return true;
+
+    } catch (connectErr) {
+      // nmcli connection failed
+      throw new Error(`Failed to connect to WiFi: ${connectErr.message}`);
     }
-
-    if (!connected) {
-      throw new Error('Wi-Fi authentication timeout');
-    }
-
-    // Request IP address via DHCP
-    console.log('  Requesting IP address via DHCP...');
-    await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: VALIDATION_TIMEOUT });
-
-    // Validate IP assignment
-    const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
-    const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
-
-    if (!ipMatch) {
-      throw new Error('Failed to obtain IP address');
-    }
-
-    console.log(`  IP address: ${ipMatch[1]}`);
-
-    // Test connectivity (optional)
-    try {
-      await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
-      console.log('  Internet connectivity: ✓');
-    } catch (err) {
-      console.log('  Internet connectivity: Limited (local network only)');
-    }
-
-    return true;
 
   } catch (err) {
     console.error(`  Error: ${err.message}`);
-
-    // Clean up failed connection attempt
-    try {
-      await execAsync('sudo killall wpa_supplicant || true');
-      await execAsync('sudo killall dhclient || true');
-      await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
-    } catch (cleanupErr) {
-      // Ignore cleanup errors
-    }
-
     return false;
   }
 }
