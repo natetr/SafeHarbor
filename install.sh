@@ -321,51 +321,65 @@ EOF
 systemctl daemon-reload
 systemctl enable safeharbor
 
-# Start the service first to initialize the database
-echo "Starting SafeHarbor service to initialize database..."
-systemctl start safeharbor
-
-# Wait for the database to be created
-echo "Waiting for database initialization..."
-sleep 3
-
-# Check if database was created
-if [ ! -f "${INSTALL_DIR}/safeharbor.db" ]; then
-  echo "⚠️  Database not found, waiting longer..."
+# Initialize database using dedicated script (avoids starting service)
+echo "Initializing database..."
+if [ -f "$(dirname "$0")/scripts/init-database.sh" ]; then
+  bash "$(dirname "$0")/scripts/init-database.sh" "${INSTALL_DIR}/safeharbor.db" || {
+    echo "⚠️  Database initialization failed"
+    echo "   Falling back to service-based initialization"
+    systemctl start safeharbor
+    sleep 5
+    systemctl stop safeharbor
+  }
+elif [ -f "${INSTALL_DIR}/scripts/init-database.sh" ]; then
+  bash "${INSTALL_DIR}/scripts/init-database.sh" "${INSTALL_DIR}/safeharbor.db" || {
+    echo "⚠️  Database initialization failed"
+    echo "   Falling back to service-based initialization"
+    systemctl start safeharbor
+    sleep 5
+    systemctl stop safeharbor
+  }
+else
+  echo "⚠️  Database init script not found, using service-based initialization"
+  systemctl start safeharbor
   sleep 5
+  systemctl stop safeharbor
 fi
 
-if [ -f "${INSTALL_DIR}/safeharbor.db" ]; then
-  echo "✓ Database initialized"
+# Set ownership of database
+chown safeharbor:safeharbor "${INSTALL_DIR}/safeharbor.db" 2>/dev/null || true
+chmod 644 "${INSTALL_DIR}/safeharbor.db" 2>/dev/null || true
 
-  # Stop the service temporarily to configure network settings
-  echo "Stopping service for configuration..."
-  systemctl stop safeharbor
+# Run first-time setup wizard (database exists now, service NOT running)
+echo ""
+echo "================================"
+echo "First-Time Setup"
+echo "================================"
+echo ""
 
-  # Run first-time setup wizard
-  echo ""
-  echo "================================"
-  echo "First-Time Setup"
-  echo "================================"
-  echo ""
-
-  if [ -f "$(dirname "$0")/scripts/first-run-setup.sh" ]; then
-    bash "$(dirname "$0")/scripts/first-run-setup.sh" || true
-  elif [ -f "${INSTALL_DIR}/scripts/first-run-setup.sh" ]; then
-    bash "${INSTALL_DIR}/scripts/first-run-setup.sh" || true
-  else
-    echo "⚠️  First-run setup wizard not found"
-    echo "   You can configure WiFi settings later in the Admin Panel"
-    echo ""
-  fi
-
-  # Restart the service with the new configuration
-  echo "Restarting SafeHarbor service..."
-  systemctl start safeharbor
+if [ -f "$(dirname "$0")/scripts/first-run-setup.sh" ]; then
+  bash "$(dirname "$0")/scripts/first-run-setup.sh" || true
+elif [ -f "${INSTALL_DIR}/scripts/first-run-setup.sh" ]; then
+  bash "${INSTALL_DIR}/scripts/first-run-setup.sh" || true
 else
-  echo "⚠️  Could not initialize database"
-  echo "   Check logs with: sudo journalctl -u safeharbor -n 50"
+  echo "⚠️  First-run setup wizard not found"
+  echo "   You can configure WiFi settings later in the Admin Panel"
   echo ""
+fi
+
+# NOW start the service with the configured network settings
+echo "Starting SafeHarbor service..."
+systemctl start safeharbor
+
+# Wait a moment for service to start
+sleep 3
+
+# Check if service started successfully
+if systemctl is-active --quiet safeharbor; then
+  echo "✓ SafeHarbor service started successfully"
+else
+  echo "⚠️  Service may have issues starting"
+  echo "   Check logs with: sudo journalctl -u safeharbor -n 50"
 fi
 
 # Configure firewall
