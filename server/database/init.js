@@ -99,6 +99,49 @@ function restoreFromBackup() {
   }
 }
 
+function createFreshDatabase() {
+  console.log('\n═══════════════════════════════════════════════');
+  console.log('CREATING FRESH DATABASE');
+  console.log('═══════════════════════════════════════════════\n');
+  console.log('⚠️  WARNING: All previous data will be lost!');
+  console.log('   - Admin credentials reset to defaults');
+  console.log('   - Network configuration will be reset');
+  console.log('   - Content metadata will be cleared');
+  console.log('   - ZIM files on disk are preserved\n');
+
+  try {
+    // Create new empty database
+    const freshDb = new Database(DB_PATH);
+    console.log('✓ Created new database file');
+
+    // Configure pragmas inline (configureDatabasePragmas is defined later)
+    freshDb.pragma('journal_mode = WAL');
+    freshDb.pragma('busy_timeout = 30000');
+    freshDb.pragma('synchronous = NORMAL');
+    freshDb.pragma('cache_size = -64000');
+    freshDb.pragma('foreign_keys = ON');
+    freshDb.pragma('wal_autocheckpoint = 100');
+    freshDb.pragma('temp_store = MEMORY');
+    console.log('✓ Applied database configuration');
+
+    // Return the fresh database - initDatabase() will be called later
+    console.log('✓ Created fresh database instance');
+    console.log('\n═══════════════════════════════════════════════');
+    console.log('FRESH DATABASE CREATED SUCCESSFULLY');
+    console.log('═══════════════════════════════════════════════\n');
+    console.log('⚠️  Database schema will be initialized on next startup');
+    console.log('\n🔐 Default admin credentials will be:');
+    console.log('   Username: admin');
+    console.log('   Password: admin');
+    console.log('   ⚠️  CHANGE THESE IMMEDIATELY!\n');
+
+    return freshDb;
+  } catch (err) {
+    console.error('❌ Failed to create fresh database:', err.message);
+    throw err;
+  }
+}
+
 // Create database connection with corruption detection and auto-recovery
 let db;
 let dbCorrupted = false;
@@ -158,25 +201,50 @@ if (dbCorrupted) {
       const integrityCheck = checkDatabaseIntegrity(db);
       if (!integrityCheck.ok) {
         console.error('❌ Restored database is also corrupted!');
-        console.error('This is a critical error - manual intervention required');
-        process.exit(1);
-      }
+        console.error('⚠️  All backups are corrupted - creating fresh database...\n');
+        db.close();
 
-      console.log('✓ Restored database integrity verified');
-      console.log('\n═══════════════════════════════════════════════');
-      console.log('DATABASE RECOVERY SUCCESSFUL');
-      console.log('═══════════════════════════════════════════════\n');
+        // Move corrupted backup to archives
+        const corruptBackupPath = `${DB_PATH}.corrupt-backup-${Date.now()}`;
+        fs.renameSync(DB_PATH, corruptBackupPath);
+        console.log(`✓ Moved corrupted backup to: ${corruptBackupPath}`);
+
+        // Create fresh database
+        db = createFreshDatabase();
+      } else {
+        console.log('✓ Restored database integrity verified');
+        console.log('\n═══════════════════════════════════════════════');
+        console.log('DATABASE RECOVERY SUCCESSFUL');
+        console.log('═══════════════════════════════════════════════\n');
+      }
     } catch (err) {
       console.error('❌ Failed to open restored database:', err.message);
-      process.exit(1);
+      console.error('⚠️  Creating fresh database as last resort...\n');
+
+      try {
+        db = createFreshDatabase();
+      } catch (freshErr) {
+        console.error('❌ CRITICAL: Cannot create fresh database:', freshErr.message);
+        process.exit(1);
+      }
     }
   } else {
-    console.error('❌ Could not restore database from backup');
-    console.error('This is a critical error - manual intervention required');
-    console.error('\nPossible solutions:');
-    console.error('1. Restore from an external backup if available');
-    console.error('2. Delete the corrupted database and start fresh (DATA LOSS!)');
-    process.exit(1);
+    console.error('❌ No backup files found');
+    console.error('⚠️  Creating fresh database...\n');
+
+    try {
+      // Move corrupted database to archives
+      if (fs.existsSync(DB_PATH)) {
+        const corruptPath = `${DB_PATH}.corrupt-no-backup-${Date.now()}`;
+        fs.renameSync(DB_PATH, corruptPath);
+        console.log(`✓ Moved corrupted database to: ${corruptPath}`);
+      }
+
+      db = createFreshDatabase();
+    } catch (err) {
+      console.error('❌ CRITICAL: Cannot create fresh database:', err.message);
+      process.exit(1);
+    }
   }
 }
 
