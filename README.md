@@ -66,7 +66,9 @@ SafeHarbor is a complete, self-contained application that turns a Raspberry Pi i
 
 ### Quick Install
 
-1. Clone or download SafeHarbor to your Raspberry Pi:
+SafeHarbor provides a streamlined installation process with automatic WiFi configuration.
+
+1. Clone SafeHarbor to your Raspberry Pi:
 
 ```bash
 git clone https://github.com/yourusername/safeharbor.git
@@ -79,11 +81,21 @@ cd safeharbor
 sudo bash install.sh
 ```
 
+The installer will:
+- Install all dependencies and build the application
+- Launch a **First-Run Setup Wizard** to configure your home WiFi
+- Automatically connect SafeHarbor to your network
+- Start the service
+
 3. Access SafeHarbor:
 
 ```
-http://YOUR_PI_IP:3000
+http://safeharbor.local:3000
 ```
+
+**First-Time Setup:** During installation, you'll be prompted to enter your WiFi credentials. SafeHarbor will automatically connect to your home network on startup. You can skip this and configure WiFi later in the Admin Panel.
+
+**Clean Installation:** If you're reinstalling or cleaning up a previous installation, see [CLEAN_INSTALL_GUIDE.md](CLEAN_INSTALL_GUIDE.md) for complete instructions.
 
 ### Manual Installation
 
@@ -372,6 +384,15 @@ sudo systemctl status safeharbor
 
 # View logs
 sudo journalctl -u safeharbor -f
+
+# Reconfigure WiFi
+sudo bash scripts/first-run-setup.sh
+
+# Fix permissions
+sudo bash scripts/fix-permissions.sh
+
+# Uninstall SafeHarbor
+sudo bash uninstall.sh
 ```
 
 ## Troubleshooting

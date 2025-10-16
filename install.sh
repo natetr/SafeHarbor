@@ -259,9 +259,29 @@ ProtectHome=read-only
 WantedBy=multi-user.target
 EOF
 
-# Enable and start service
+# Reload systemd configuration
 systemctl daemon-reload
 systemctl enable safeharbor
+
+# Run first-time setup wizard
+echo ""
+echo "================================"
+echo "First-Time Setup"
+echo "================================"
+echo ""
+
+if [ -f "$(dirname "$0")/scripts/first-run-setup.sh" ]; then
+  bash "$(dirname "$0")/scripts/first-run-setup.sh" || true
+elif [ -f "${INSTALL_DIR}/scripts/first-run-setup.sh" ]; then
+  bash "${INSTALL_DIR}/scripts/first-run-setup.sh" || true
+else
+  echo "⚠️  First-run setup wizard not found"
+  echo "   You can configure WiFi settings later in the Admin Panel"
+  echo ""
+fi
+
+# Start the service
+echo "Starting SafeHarbor service..."
 systemctl start safeharbor
 
 # Configure firewall
