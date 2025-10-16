@@ -71,24 +71,37 @@ export async function applyNetworkConfigOnStartup() {
       console.log('Applying HOME NETWORK mode configuration...');
       console.log(`Network: ${config.home_network_ssid}`);
 
-      const success = await applyHomeNetworkMode(config);
+      // Try to connect with retry logic
+      const MAX_RETRIES = 3;
+      let success = false;
 
-      if (success) {
-        console.log('✓ Home network mode applied successfully');
-        console.log(`  Connected to: ${config.home_network_ssid}`);
-      } else {
-        console.log('✗ Failed to connect to home network');
-        console.log('  Falling back to hotspot mode...');
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        console.log(`  Connection attempt ${attempt}/${MAX_RETRIES}...`);
+        success = await applyHomeNetworkMode(config);
 
-        // Update database to reflect hotspot mode
-        const { safeDbRun } = await import('../database/init.js');
-        await safeDbRun(
-          'UPDATE network_config SET mode = ? WHERE id = ?',
-          ['hotspot', config.id]
-        );
+        if (success) {
+          console.log('✓ Home network mode applied successfully');
+          console.log(`  Connected to: ${config.home_network_ssid}`);
+          break;
+        }
 
-        await applyHotspotMode(config);
-        console.log('✓ Hotspot mode activated as fallback');
+        if (attempt < MAX_RETRIES) {
+          console.log(`  Attempt ${attempt} failed, waiting 10 seconds before retry...`);
+          await new Promise(resolve => setTimeout(resolve, 10000));
+        }
+      }
+
+      if (!success) {
+        console.log('✗ Failed to connect to home network after 3 attempts');
+        console.log('⚠️  SafeHarbor will keep trying to connect in home network mode');
+        console.log('   You can manually switch to hotspot mode in the Admin Panel if needed');
+        console.log('');
+        console.log('   NOTE: Database mode setting remains "home" - the app will retry');
+        console.log('         on next restart. This prevents accidental lockout.');
+        console.log('');
+        console.log('   If WiFi is temporarily unavailable, SafeHarbor will be accessible via:');
+        console.log('   - Ethernet connection (if connected)');
+        console.log('   - After reconnecting to WiFi and restarting the service');
       }
     }
 
