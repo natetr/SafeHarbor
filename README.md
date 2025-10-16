@@ -18,18 +18,25 @@ SafeHarbor is a self-contained application that turns a Raspberry Pi into a powe
 
 - Raspberry Pi 3B+ or newer (Pi 4/5 recommended)
 - MicroSD card (32GB minimum, 128GB+ recommended)
-- Raspberry Pi OS (Bullseye or newer)
+- Raspberry Pi OS (Bullseye or newer) - Lite or Desktop version
 
 ### Installation
 
-1. **Clone SafeHarbor on your Raspberry Pi:**
+1. **Install git (if on a fresh Raspberry Pi OS Lite install):**
 
 ```bash
-git clone https://github.com/yourusername/safeharbor.git
+sudo apt-get update
+sudo apt-get install -y git
+```
+
+2. **Clone SafeHarbor on your Raspberry Pi:**
+
+```bash
+git clone https://github.com/natetr/safeharbor.git
 cd safeharbor
 ```
 
-2. **Run the installer:**
+3. **Run the installer:**
 
 ```bash
 sudo bash install.sh
@@ -41,7 +48,7 @@ The installer will:
 - Create and start the SafeHarbor service
 - Configure network settings
 
-3. **Access SafeHarbor:**
+4. **Access SafeHarbor:**
 
 ```
 http://safeharbor.local:3000
