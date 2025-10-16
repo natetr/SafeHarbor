@@ -232,7 +232,7 @@ After=network.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 User=safeharbor
 WorkingDirectory=/opt/safeharbor
 ExecStart=/usr/bin/node /opt/safeharbor/server/index.js
@@ -252,12 +252,11 @@ StartLimitIntervalSec=600
 # Don't restart if app exits with these codes (intentional shutdown)
 RestartPreventExitStatus=0 2
 
-# Watchdog - app must ping systemd every 60s or it will be restarted
-# This catches hung processes that don't crash but stop responding
-WatchdogSec=60
-
 # Graceful shutdown - give app 30s to clean up before SIGKILL
 TimeoutStopSec=30
+
+# Startup timeout - give app 3 minutes to initialize database and start
+TimeoutStartSec=180
 
 # Resource limits
 LimitNOFILE=65536
@@ -296,14 +295,26 @@ systemctl enable safeharbor
 echo "Starting SafeHarbor service to initialize database..."
 systemctl start safeharbor
 
-# Wait for the database to be created
+# Wait for the database to be created with better progress indication
 echo "Waiting for database initialization..."
-sleep 3
+WAIT_COUNT=0
+MAX_WAIT=30  # Wait up to 30 seconds
+
+while [ ! -f "${INSTALL_DIR}/safeharbor.db" ] && [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+  sleep 1
+  WAIT_COUNT=$((WAIT_COUNT + 1))
+  echo -n "."
+done
+echo ""
 
 # Check if database was created
 if [ ! -f "${INSTALL_DIR}/safeharbor.db" ]; then
-  echo "⚠️  Database not found, waiting longer..."
-  sleep 5
+  echo "⚠️  Database still not found after ${MAX_WAIT} seconds"
+  echo "   Checking service status..."
+  systemctl status safeharbor --no-pager -l
+  echo ""
+  echo "   Check logs with: sudo journalctl -u safeharbor -n 50"
+  echo ""
 fi
 
 if [ -f "${INSTALL_DIR}/safeharbor.db" ]; then
