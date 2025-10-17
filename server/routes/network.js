@@ -405,12 +405,12 @@ async function checkEthernetConnectivity() {
   return { connected: false, ip: null };
 }
 
-// Helper function to apply home network configuration with automatic fallback
-// Uses NetworkManager via nmcli for reliable WiFi connectivity
+// Helper function to apply home network configuration
+// Hands WiFi control back to the system's NetworkManager
 async function applyHomeNetworkConfig(config) {
   const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
 
-  console.log(`Attempting to connect to home network: ${config.home_network_ssid}`);
+  console.log('Switching to home network mode (system WiFi configuration)');
 
   // Check ethernet status before making changes
   const ethernetBefore = await checkEthernetConnectivity();
@@ -457,75 +457,63 @@ async function applyHomeNetworkConfig(config) {
     await execAsync(`sudo nmcli device set ${INTERFACE} managed yes`);
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Delete existing connection if it exists
-    const CONNECTION_NAME = 'SafeHarbor-Home';
-    try {
-      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null`);
-    } catch (err) {
-      // Connection doesn't exist, that's fine
+    // Hand control back to NetworkManager
+    console.log('  Returning WiFi control to system...');
+    await execAsync(`sudo nmcli device reapply ${INTERFACE} 2>/dev/null || true`);
+
+    // Give NetworkManager time to connect
+    console.log('  Waiting for system to connect to WiFi...');
+    let connected = false;
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    while (!connected && attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      attempts++;
+
+      try {
+        const { stdout: state } = await execAsync(`nmcli -t -f GENERAL.STATE device show ${INTERFACE}`);
+        if (state.includes('100 (connected)')) {
+          connected = true;
+        }
+      } catch (err) {
+        // Continue waiting
+      }
     }
 
-    // Create new WiFi connection profile
-    console.log(`  Creating connection profile for "${config.home_network_ssid}"...`);
-    try {
-      await execAsync(`sudo nmcli connection add \
-        type wifi \
-        con-name "${CONNECTION_NAME}" \
-        ifname ${INTERFACE} \
-        ssid "${config.home_network_ssid}" \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "${config.home_network_password}" \
-        connection.autoconnect no \
-        connection.autoconnect-priority 0`);
-    } catch (err) {
-      throw new Error(`Failed to create WiFi profile: ${err.message}`);
-    }
+    // Check final status
+    if (connected) {
+      try {
+        const { stdout: deviceInfo } = await execAsync(`nmcli device show ${INTERFACE}`);
 
-    // Activate the connection
-    console.log(`  Connecting to "${config.home_network_ssid}"...`);
-    try {
-      await execAsync(`sudo nmcli connection up "${CONNECTION_NAME}"`, { timeout: 30000 });
-    } catch (err) {
-      // Connection failed - clean up
-      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null || true`);
-      throw new Error(`Failed to connect to WiFi network: ${err.message}`);
-    }
+        // Extract connection name
+        const connectionMatch = deviceInfo.match(/GENERAL\.CONNECTION:\s*(.+)/);
+        if (connectionMatch && connectionMatch[1] !== '--') {
+          console.log(`  ✓ Connected to: ${connectionMatch[1]}`);
+        }
 
-    // Wait for connection to stabilize
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    // Verify connection and get IP address
-    try {
-      const { stdout: deviceInfo } = await execAsync(`nmcli device show ${INTERFACE}`);
-
-      // Check connection state
-      if (!deviceInfo.includes('GENERAL.STATE:.*100 (connected)')) {
-        // Extract actual state for debugging
-        const stateMatch = deviceInfo.match(/GENERAL\.STATE:\s*(\S+.*)/);
-        const state = stateMatch ? stateMatch[1] : 'unknown';
-        console.log(`  Connection state: ${state}`);
+        // Extract IP address
+        const ipMatch = deviceInfo.match(/IP4\.ADDRESS\[1\]:\s*(\d+\.\d+\.\d+\.\d+)/);
+        if (ipMatch) {
+          console.log(`  ✓ IP address: ${ipMatch[1]}`);
+        }
+      } catch (err) {
+        console.log('  ✓ Connected');
       }
 
-      // Extract IP address
-      const ipMatch = deviceInfo.match(/IP4\.ADDRESS\[1\]:\s*(\d+\.\d+\.\d+\.\d+)/);
-      if (ipMatch) {
-        console.log(`  ✓ Connected with IP address: ${ipMatch[1]}`);
-      } else {
-        console.log('  ✓ Connected (waiting for IP address)');
+      // Test connectivity
+      try {
+        await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
+        console.log('  Internet connectivity: ✓');
+      } catch (err) {
+        console.log('  Internet connectivity: Limited (local network only)');
       }
-    } catch (err) {
-      console.warn('  Warning: Could not verify connection details');
-    }
 
-    // Test connectivity
-    try {
-      await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
-      console.log('  Internet connectivity: ✓');
-    } catch (err) {
-      console.log('  Internet connectivity: Limited (local network only)');
+      console.log('✓ Successfully switched to home network mode');
+    } else {
+      console.log('  ⚠ WiFi not connected - system may connect later');
+      console.log('  Use WiFi Settings page to configure a network if needed');
     }
-
-    console.log(`✓ Successfully connected to home network: ${config.home_network_ssid}`);
 
     // Verify ethernet is still working after network switch
     const ethernetAfter = await checkEthernetConnectivity();
@@ -537,34 +525,127 @@ async function applyHomeNetworkConfig(config) {
     await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
 
   } catch (err) {
-    console.error(`✗ Failed to connect to home network: ${err.message}`);
-    console.log('🔄 Falling back to hotspot mode...');
+    console.error(`✗ Failed to switch to home network mode: ${err.message}`);
 
-    // Clean up on failure - set device back to unmanaged for hotspot mode
-    try {
-      const CONNECTION_NAME = 'SafeHarbor-Home';
-      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null || true`);
-      await execAsync(`sudo nmcli device set ${INTERFACE} managed no`);
-    } catch (cleanupErr) {
-      // Ignore cleanup errors
-    }
-
-    // Update database to revert to hotspot mode
-    await safeDbRun(
-      'UPDATE network_config SET mode = ? WHERE id = (SELECT id FROM network_config ORDER BY id DESC LIMIT 1)',
-      ['hotspot']
-    );
-
-    // Apply hotspot configuration as fallback
-    await applyHotspotConfig(config);
-
+    // Don't automatically fall back - let the user decide what to do
     throw new Error(
-      `Could not connect to home network "${config.home_network_ssid}". ` +
-      `This may be due to incorrect password, network not in range, or network configuration issues. ` +
-      `The system has automatically switched back to hotspot mode for access. ` +
-      `Please verify your network credentials and try again.`
+      `Failed to switch to home network mode. ` +
+      `The system WiFi configuration will handle the connection. ` +
+      `If WiFi doesn't connect, use the WiFi Settings page to configure a network.`
     );
   }
 }
+
+// WiFi Management Endpoints (for hybrid mode)
+
+// Scan for available WiFi networks
+router.get('/wifi/scan', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
+
+    // Trigger a scan
+    await execAsync(`sudo nmcli device wifi rescan 2>/dev/null || true`);
+
+    // Wait for scan to complete
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Get list of networks
+    const { stdout } = await execAsync(`sudo nmcli -t -f SSID,SIGNAL,SECURITY device wifi list`);
+
+    const networks = stdout
+      .split('\n')
+      .filter(line => line.trim())
+      .map(line => {
+        const [ssid, signal, security] = line.split(':');
+        return {
+          ssid: ssid || '',
+          signal: parseInt(signal) || 0,
+          security: security || 'Open'
+        };
+      })
+      .filter(network => network.ssid) // Remove empty SSIDs
+      .sort((a, b) => b.signal - a.signal); // Sort by signal strength
+
+    res.json({ networks });
+  } catch (err) {
+    console.error('Error scanning for WiFi networks:', err);
+    res.status(500).json({ error: 'Failed to scan for networks' });
+  }
+});
+
+// Get list of saved WiFi connections
+router.get('/wifi/connections', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { stdout } = await execAsync(`sudo nmcli -t -f NAME,TYPE connection show`);
+
+    const connections = stdout
+      .split('\n')
+      .filter(line => line.includes(':wifi') || line.includes(':802-11-wireless'))
+      .map(line => {
+        const [name] = line.split(':');
+        return { name };
+      });
+
+    res.json({ connections });
+  } catch (err) {
+    console.error('Error getting WiFi connections:', err);
+    res.status(500).json({ error: 'Failed to get connections' });
+  }
+});
+
+// Connect to a WiFi network
+router.post('/wifi/connect', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { ssid, password } = req.body;
+
+    if (!ssid) {
+      return res.status(400).json({ error: 'SSID is required' });
+    }
+
+    const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
+
+    // Make sure interface is managed
+    await execAsync(`sudo nmcli device set ${INTERFACE} managed yes`);
+
+    // Try to connect
+    let command = `sudo nmcli device wifi connect "${ssid}"`;
+    if (password) {
+      command += ` password "${password}"`;
+    }
+
+    try {
+      await execAsync(command, { timeout: 30000 });
+      res.json({ message: `Connected to ${ssid}` });
+    } catch (err) {
+      if (err.message.includes('No network with SSID')) {
+        res.status(404).json({ error: 'Network not found' });
+      } else if (err.message.includes('Secrets were required')) {
+        res.status(400).json({ error: 'Password required for this network' });
+      } else {
+        res.status(400).json({ error: `Failed to connect: ${err.message}` });
+      }
+    }
+  } catch (err) {
+    console.error('Error connecting to WiFi:', err);
+    res.status(500).json({ error: 'Failed to connect to network' });
+  }
+});
+
+// Delete a saved WiFi connection
+router.delete('/wifi/connection/:name', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name } = req.params;
+
+    await execAsync(`sudo nmcli connection delete "${name}"`);
+    res.json({ message: `Connection "${name}" deleted` });
+  } catch (err) {
+    if (err.message.includes('no connection')) {
+      res.status(404).json({ error: 'Connection not found' });
+    } else {
+      console.error('Error deleting WiFi connection:', err);
+      res.status(500).json({ error: 'Failed to delete connection' });
+    }
+  }
+});
 
 export default router;

@@ -66,7 +66,7 @@ export async function applyNetworkConfigOnStartup() {
     } else if (config.mode === 'home') {
       console.log('');
       console.log('Applying HOME NETWORK mode configuration...');
-      console.log(`Network: ${config.home_network_ssid}`);
+      console.log('Using system WiFi configuration');
 
       // Try to connect with retry logic
       const MAX_RETRIES = 3;
@@ -371,7 +371,7 @@ address=/#/192.168.4.1
 }
 
 /**
- * Apply home network mode configuration using wpa_supplicant
+ * Apply home network mode - hands WiFi control back to the system
  * CRITICAL: Never restarts NetworkManager - preserves Ethernet connectivity
  */
 async function applyHomeNetworkMode(config) {
@@ -379,28 +379,25 @@ async function applyHomeNetworkMode(config) {
 
   try {
     console.log('  Switching to home network mode...');
-    console.log('  (Ethernet connectivity will be preserved)');
+    console.log('  (Returning WiFi control to system)');
 
     // Stop hotspot services
     await execAsync('sudo killall hostapd || true');
     await execAsync('sudo killall dnsmasq || true');
-    await execAsync('sudo killall wpa_supplicant || true');
-    await execAsync('sudo killall dhclient || true');
-    await execAsync('sudo killall dhcpcd || true');
 
     // Clean up wlan0-specific iptables rules (preserve ethernet)
     await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE || true`);
     await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
     await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
 
-    // Bring interface down cleanly
+    // Reset the interface
     await execAsync(`sudo ip link set ${INTERFACE} down`);
     await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
 
     // Check if WiFi is blocked by rfkill
     try {
       const { stdout: rfkillStatus } = await execAsync('rfkill list wifi 2>/dev/null || true');
-      if (rfkillStatus.includes('Soft blocked: yes') || rfkillStatus.includes('Hard blocked: yes')) {
+      if (rfkillStatus.includes('Soft blocked: yes')) {
         console.log('  Unblocking WiFi interface...');
         await execAsync('sudo rfkill unblock wifi');
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -409,81 +406,67 @@ async function applyHomeNetworkMode(config) {
       // rfkill not available, continue
     }
 
-    // Bring interface up
+    // Bring interface back up
     await execAsync(`sudo ip link set ${INTERFACE} up`);
-    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Enable NetworkManager management of wlan0
-    console.log('  Enabling NetworkManager management of wlan0...');
+    console.log('  Handing control to NetworkManager...');
     await execAsync(`sudo nmcli device set ${INTERFACE} managed yes`);
-    await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Delete existing connection if it exists
-    const CONNECTION_NAME = 'SafeHarbor-Home';
-    try {
-      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null`);
-    } catch (err) {
-      // Connection doesn't exist, that's fine
+    // Let NetworkManager auto-connect to any saved network
+    console.log('  Triggering NetworkManager auto-connect...');
+    await execAsync(`sudo nmcli device reapply ${INTERFACE} 2>/dev/null || true`);
+
+    // Give NetworkManager time to connect
+    console.log('  Waiting for system to connect to WiFi...');
+    let connected = false;
+    let attempts = 0;
+    const maxAttempts = 10;
+
+    while (!connected && attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      attempts++;
+
+      try {
+        const { stdout: state } = await execAsync(`nmcli -t -f GENERAL.STATE device show ${INTERFACE}`);
+        if (state.includes('100 (connected)')) {
+          connected = true;
+        }
+      } catch (err) {
+        // Continue waiting
+      }
     }
 
-    // Create new WiFi connection profile
-    console.log(`  Creating connection profile for "${config.home_network_ssid}"...`);
-    try {
-      await execAsync(`sudo nmcli connection add \
-        type wifi \
-        con-name "${CONNECTION_NAME}" \
-        ifname ${INTERFACE} \
-        ssid "${config.home_network_ssid}" \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "${config.home_network_password}" \
-        connection.autoconnect no \
-        connection.autoconnect-priority 0`);
-    } catch (err) {
-      throw new Error(`Failed to create WiFi profile: ${err.message}`);
-    }
+    // Check final status
+    if (connected) {
+      try {
+        const { stdout: deviceInfo } = await execAsync(`nmcli device show ${INTERFACE}`);
 
-    // Activate the connection
-    console.log(`  Connecting to "${config.home_network_ssid}"...`);
-    try {
-      await execAsync(`sudo nmcli connection up "${CONNECTION_NAME}"`, { timeout: 30000 });
-    } catch (err) {
-      // Connection failed - clean up
-      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null || true`);
-      throw new Error(`Failed to connect to WiFi network: ${err.message}`);
-    }
+        // Extract connection name
+        const connectionMatch = deviceInfo.match(/GENERAL\.CONNECTION:\s*(.+)/);
+        if (connectionMatch && connectionMatch[1] !== '--') {
+          console.log(`  ✓ Connected to: ${connectionMatch[1]}`);
+        }
 
-    // Wait for connection to stabilize
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    // Verify connection and get IP address
-    try {
-      const { stdout: deviceInfo } = await execAsync(`nmcli device show ${INTERFACE}`);
-
-      // Check connection state
-      if (!deviceInfo.includes('GENERAL.STATE:.*100 (connected)')) {
-        // Extract actual state for debugging
-        const stateMatch = deviceInfo.match(/GENERAL\.STATE:\s*(\S+.*)/);
-        const state = stateMatch ? stateMatch[1] : 'unknown';
-        console.log(`  Connection state: ${state}`);
+        // Extract IP address
+        const ipMatch = deviceInfo.match(/IP4\.ADDRESS\[1\]:\s*(\d+\.\d+\.\d+\.\d+)/);
+        if (ipMatch) {
+          console.log(`  ✓ IP address: ${ipMatch[1]}`);
+        }
+      } catch (err) {
+        console.log('  ✓ Connected');
       }
 
-      // Extract IP address
-      const ipMatch = deviceInfo.match(/IP4\.ADDRESS\[1\]:\s*(\d+\.\d+\.\d+\.\d+)/);
-      if (ipMatch) {
-        console.log(`  ✓ Connected with IP address: ${ipMatch[1]}`);
-      } else {
-        console.log('  ✓ Connected (waiting for IP address)');
+      // Test connectivity
+      try {
+        await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
+        console.log('  Internet connectivity: ✓');
+      } catch (err) {
+        console.log('  Internet connectivity: Limited (local network only)');
       }
-    } catch (err) {
-      console.warn('  Warning: Could not verify connection details');
-    }
-
-    // Test connectivity
-    try {
-      await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
-      console.log('  Internet connectivity: ✓');
-    } catch (err) {
-      console.log('  Internet connectivity: Limited (local network only)');
+    } else {
+      console.log('  ⚠ WiFi not connected - system may connect later');
+      console.log('  Use WiFi Settings page to configure a network if needed');
     }
 
     return true;
@@ -491,12 +474,8 @@ async function applyHomeNetworkMode(config) {
   } catch (err) {
     console.error(`  Error: ${err.message}`);
 
-    // Clean up on failure - set device back to unmanaged for hotspot mode
+    // Clean up on failure but don't force unmanaged
     try {
-      const CONNECTION_NAME = 'SafeHarbor-Home';
-      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null || true`);
-      await execAsync(`sudo nmcli device set ${INTERFACE} managed no`);
-    } catch (cleanupErr) {
       // Ignore cleanup errors
     }
 
