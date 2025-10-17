@@ -256,6 +256,8 @@ safeharbor ALL=(ALL) NOPASSWD: /sbin/dhcpcd
 safeharbor ALL=(ALL) NOPASSWD: /usr/bin/rfkill
 safeharbor ALL=(ALL) NOPASSWD: /sbin/iw
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/iw
+safeharbor ALL=(ALL) NOPASSWD: /usr/bin/nmcli
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/nmcli
 safeharbor ALL=(ALL) NOPASSWD: /bin/systemctl
 safeharbor ALL=(ALL) NOPASSWD: /sbin/reboot
 safeharbor ALL=(ALL) NOPASSWD: /sbin/shutdown
@@ -413,38 +415,13 @@ if systemctl list-unit-files | grep -q netfilter-persistent; then
   systemctl enable netfilter-persistent 2>/dev/null || true
 fi
 
-# Configure NetworkManager to not interfere with wlan0
-# SafeHarbor manages wlan0 directly for hotspot and home network modes
+# Note: NetworkManager configuration is now handled dynamically by the application
+# The app will set wlan0 to managed/unmanaged as needed for each mode
 if command -v nmcli &> /dev/null; then
-  echo "Configuring NetworkManager to ignore wlan0..."
-
-  # Create NetworkManager configuration
-  mkdir -p /etc/NetworkManager/conf.d
-  cat > /etc/NetworkManager/conf.d/safeharbor-unmanaged.conf <<EOF
-# SafeHarbor Network Configuration
-# This file prevents NetworkManager from managing the wireless interface
-# SafeHarbor manages the interface directly for hotspot and home network modes
-
-[keyfile]
-unmanaged-devices=interface-name:wlan0
-EOF
-
-  # Remove any existing wlan0 connections
-  CONNECTIONS=$(nmcli -t -f NAME,DEVICE connection show 2>/dev/null | grep ":wlan0$" | cut -d: -f1 || true)
-  if [ -n "$CONNECTIONS" ]; then
-    while IFS= read -r conn; do
-      echo "  Removing NetworkManager connection: $conn"
-      nmcli connection delete "$conn" 2>/dev/null || true
-    done <<< "$CONNECTIONS"
-  fi
-
-  # Reload NetworkManager
-  systemctl reload NetworkManager 2>/dev/null || true
-
-  echo "✓ NetworkManager configured to ignore wlan0"
-  echo "  SafeHarbor now has full control over the wireless interface"
+  echo "✓ NetworkManager detected - will be managed dynamically by SafeHarbor"
 else
-  echo "NetworkManager not installed - no configuration needed"
+  echo "⚠️  NetworkManager not installed - WiFi connectivity may be limited"
+  echo "   Consider installing NetworkManager for better network support"
 fi
 
 echo "================================"

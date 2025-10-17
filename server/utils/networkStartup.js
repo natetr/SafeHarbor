@@ -51,9 +51,6 @@ export async function applyNetworkConfigOnStartup() {
 
     console.log(`Network mode configured: ${config.mode}`);
 
-    // Configure NetworkManager to not interfere with wlan0
-    await configureNetworkManager();
-
     // Apply the configured network mode
     if (config.mode === 'hotspot') {
       console.log('');
@@ -152,60 +149,6 @@ async function checkRequiredTools() {
   return missing;
 }
 
-/**
- * Configure NetworkManager to not interfere with wlan0
- * This is set once during installation and never changed
- * CRITICAL: Only reloads config, never restarts NetworkManager
- */
-async function configureNetworkManager() {
-  try {
-    const INTERFACE = process.env.NETWORK_INTERFACE || 'wlan0';
-    const NM_CONFIG_FILE = '/etc/NetworkManager/conf.d/safeharbor-unmanaged.conf';
-
-    // Check if already configured
-    try {
-      await execAsync(`test -f ${NM_CONFIG_FILE}`);
-      console.log(`  NetworkManager already configured (${INTERFACE} unmanaged)`);
-      return; // Already configured, nothing to do
-    } catch (err) {
-      // File doesn't exist, need to configure
-    }
-
-    // Check if NetworkManager is running
-    try {
-      await execAsync('systemctl is-active NetworkManager');
-    } catch (err) {
-      console.log('  NetworkManager not active, skipping configuration');
-      return;
-    }
-
-    console.log(`  Configuring NetworkManager to ignore ${INTERFACE}...`);
-
-    // Create NetworkManager configuration to ignore wlan0 permanently
-    // This allows ethernet and other interfaces to continue working
-    const nmConfig = `# SafeHarbor Network Configuration
-# This file prevents NetworkManager from managing the wireless interface
-# SafeHarbor manages the interface directly for both hotspot and home network modes
-
-[keyfile]
-unmanaged-devices=interface-name:${INTERFACE}
-`;
-
-    // Write config file
-    fs.writeFileSync('/tmp/safeharbor-unmanaged.conf', nmConfig);
-    await execAsync(`sudo cp /tmp/safeharbor-unmanaged.conf ${NM_CONFIG_FILE}`);
-    await execAsync('sudo rm /tmp/safeharbor-unmanaged.conf');
-
-    // Reload NetworkManager to apply configuration (NOT restart!)
-    await execAsync('sudo systemctl reload NetworkManager');
-
-    console.log(`  ✓ NetworkManager configured to ignore ${INTERFACE}`);
-    console.log('    (Ethernet and other interfaces remain managed)');
-  } catch (err) {
-    console.warn('  Warning: Could not configure NetworkManager:', err.message);
-    // Don't fail startup if this doesn't work
-  }
-}
 
 /**
  * Select the best WiFi channel for hotspot mode
@@ -285,7 +228,12 @@ async function applyHotspotMode(config) {
     await execAsync('sudo killall dnsmasq || true');
     await execAsync('sudo killall wpa_supplicant || true');
     await execAsync('sudo killall dhclient || true');
+    await execAsync('sudo killall dhcpcd || true');
     await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Set NetworkManager to unmanaged mode for wlan0
+    console.log('  Setting wlan0 to unmanaged mode...');
+    await execAsync(`sudo nmcli device set ${INTERFACE} managed no`);
 
     // Select best WiFi channel
     const channel = await selectBestChannel(INTERFACE);
@@ -461,89 +409,76 @@ async function applyHomeNetworkMode(config) {
       // rfkill not available, continue
     }
 
-    // Create wpa_supplicant configuration with proper ctrl_interface
-    const wpaConf = `ctrl_interface=/var/run/wpa_supplicant
-ctrl_interface_group=netdev
-update_config=1
-country=US
-
-network={
-    ssid="${config.home_network_ssid}"
-    psk="${config.home_network_password}"
-    key_mgmt=WPA-PSK
-    proto=RSN WPA
-    pairwise=CCMP TKIP
-    group=CCMP TKIP
-}
-`;
-    fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
-    await execAsync('sudo chmod 600 /tmp/wpa_supplicant.conf');
-
-    // Ensure control interface directory exists
-    await execAsync('sudo mkdir -p /var/run/wpa_supplicant');
-    await execAsync('sudo chown root:netdev /var/run/wpa_supplicant');
-    await execAsync('sudo chmod 770 /var/run/wpa_supplicant');
-
     // Bring interface up
     await execAsync(`sudo ip link set ${INTERFACE} up`);
-
-    // Wait for interface to be ready
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // Start wpa_supplicant with control interface
+    // Enable NetworkManager management of wlan0
+    console.log('  Enabling NetworkManager management of wlan0...');
+    await execAsync(`sudo nmcli device set ${INTERFACE} managed yes`);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Delete existing connection if it exists
+    const CONNECTION_NAME = 'SafeHarbor-Home';
+    try {
+      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null`);
+    } catch (err) {
+      // Connection doesn't exist, that's fine
+    }
+
+    // Create new WiFi connection profile
+    console.log(`  Creating connection profile for "${config.home_network_ssid}"...`);
+    try {
+      await execAsync(`sudo nmcli connection add \
+        type wifi \
+        con-name "${CONNECTION_NAME}" \
+        ifname ${INTERFACE} \
+        ssid "${config.home_network_ssid}" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "${config.home_network_password}" \
+        connection.autoconnect no \
+        connection.autoconnect-priority 0`);
+    } catch (err) {
+      throw new Error(`Failed to create WiFi profile: ${err.message}`);
+    }
+
+    // Activate the connection
     console.log(`  Connecting to "${config.home_network_ssid}"...`);
-    await execAsync(
-      `sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf -D nl80211,wext -s`
-    );
-
-    // Wait for connection
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    // Check if connected
     try {
-      const { stdout: wpaStatus } = await execAsync(`sudo wpa_cli -i ${INTERFACE} status`);
-      if (!wpaStatus.includes('wpa_state=COMPLETED')) {
-        throw new Error('WiFi connection not established');
-      }
-      console.log('  ✓ WiFi connection established');
+      await execAsync(`sudo nmcli connection up "${CONNECTION_NAME}"`, { timeout: 30000 });
     } catch (err) {
-      throw new Error(`WiFi authentication failed: ${err.message}`);
+      // Connection failed - clean up
+      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null || true`);
+      throw new Error(`Failed to connect to WiFi network: ${err.message}`);
     }
 
-    // Get IP address via DHCP (try dhclient first, then dhcpcd)
-    console.log('  Requesting IP address...');
-    let dhcpSuccess = false;
-
-    try {
-      // Try dhclient first
-      await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: 15000 });
-      dhcpSuccess = true;
-    } catch (err) {
-      console.log('  dhclient failed, trying dhcpcd...');
-      try {
-        // Fallback to dhcpcd (common on Raspberry Pi OS)
-        await execAsync(`sudo dhcpcd ${INTERFACE}`, { timeout: 15000 });
-        dhcpSuccess = true;
-      } catch (dhcpcdErr) {
-        console.warn('  Warning: Could not obtain IP via DHCP automatically');
-        // Continue anyway - the interface might get an IP through other means
-      }
-    }
-
-    // Wait for DHCP to complete
+    // Wait for connection to stabilize
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    // Verify we have an IP address
-    const { stdout: ifaceInfo } = await execAsync(`ip addr show ${INTERFACE}`);
-    const ipMatch = ifaceInfo.match(/inet (\d+\.\d+\.\d+\.\d+)/);
+    // Verify connection and get IP address
+    try {
+      const { stdout: deviceInfo } = await execAsync(`nmcli device show ${INTERFACE}`);
 
-    if (ipMatch) {
-      console.log(`  IP address: ${ipMatch[1]}`);
-    } else {
-      throw new Error('Failed to obtain IP address');
+      // Check connection state
+      if (!deviceInfo.includes('GENERAL.STATE:.*100 (connected)')) {
+        // Extract actual state for debugging
+        const stateMatch = deviceInfo.match(/GENERAL\.STATE:\s*(\S+.*)/);
+        const state = stateMatch ? stateMatch[1] : 'unknown';
+        console.log(`  Connection state: ${state}`);
+      }
+
+      // Extract IP address
+      const ipMatch = deviceInfo.match(/IP4\.ADDRESS\[1\]:\s*(\d+\.\d+\.\d+\.\d+)/);
+      if (ipMatch) {
+        console.log(`  ✓ Connected with IP address: ${ipMatch[1]}`);
+      } else {
+        console.log('  ✓ Connected (waiting for IP address)');
+      }
+    } catch (err) {
+      console.warn('  Warning: Could not verify connection details');
     }
 
-    // Test connectivity (optional)
+    // Test connectivity
     try {
       await execAsync('ping -c 1 -W 5 8.8.8.8', { timeout: 6000 });
       console.log('  Internet connectivity: ✓');
@@ -551,19 +486,16 @@ network={
       console.log('  Internet connectivity: Limited (local network only)');
     }
 
-    // Clean up temp file
-    await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
-
     return true;
 
   } catch (err) {
     console.error(`  Error: ${err.message}`);
 
-    // Clean up on failure
+    // Clean up on failure - set device back to unmanaged for hotspot mode
     try {
-      await execAsync('sudo killall wpa_supplicant || true');
-      await execAsync('sudo killall dhclient || true');
-      await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
+      const CONNECTION_NAME = 'SafeHarbor-Home';
+      await execAsync(`sudo nmcli connection delete "${CONNECTION_NAME}" 2>/dev/null || true`);
+      await execAsync(`sudo nmcli device set ${INTERFACE} managed no`);
     } catch (cleanupErr) {
       // Ignore cleanup errors
     }
