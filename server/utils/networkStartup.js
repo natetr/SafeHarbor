@@ -473,12 +473,6 @@ async function applyHomeNetworkMode(config) {
 
   } catch (err) {
     console.error(`  Error: ${err.message}`);
-
-    // Clean up on failure but don't force unmanaged
-    try {
-      // Ignore cleanup errors
-    }
-
     return false;
   }
 }
