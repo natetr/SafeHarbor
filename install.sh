@@ -33,9 +33,13 @@ apt-get install -y \
   wireless-tools \
   wpasupplicant \
   iptables \
+  iptables-persistent \
   lsof \
   avahi-daemon \
-  avahi-utils
+  avahi-utils \
+  dhcpcd5 \
+  rfkill \
+  iw
 
 # Install kiwix-tools with libzim 9.2.0+ (fixes macOS/large file mmap issues)
 echo "Installing kiwix-tools..."
@@ -243,6 +247,11 @@ safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_supplicant
 safeharbor ALL=(ALL) NOPASSWD: /sbin/wpa_cli
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/wpa_cli
 safeharbor ALL=(ALL) NOPASSWD: /sbin/dhclient
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/dhcpcd
+safeharbor ALL=(ALL) NOPASSWD: /sbin/dhcpcd
+safeharbor ALL=(ALL) NOPASSWD: /usr/bin/rfkill
+safeharbor ALL=(ALL) NOPASSWD: /sbin/iw
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/iw
 safeharbor ALL=(ALL) NOPASSWD: /bin/systemctl
 safeharbor ALL=(ALL) NOPASSWD: /sbin/reboot
 safeharbor ALL=(ALL) NOPASSWD: /sbin/shutdown
@@ -252,6 +261,8 @@ safeharbor ALL=(ALL) NOPASSWD: /bin/umount
 safeharbor ALL=(ALL) NOPASSWD: /usr/bin/hostnamectl
 safeharbor ALL=(ALL) NOPASSWD: /bin/cp
 safeharbor ALL=(ALL) NOPASSWD: /bin/chmod
+safeharbor ALL=(ALL) NOPASSWD: /bin/mkdir
+safeharbor ALL=(ALL) NOPASSWD: /bin/chown
 EOF
 
 chmod 440 /etc/sudoers.d/safeharbor
@@ -389,8 +400,14 @@ echo "Configuring firewall..."
 iptables -A INPUT -p tcp --dport 3000 -j ACCEPT
 iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
 
-# Save iptables rules
+# Save iptables rules (create directory if needed)
+mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules.v4 || true
+
+# Enable iptables-persistent if available
+if systemctl list-unit-files | grep -q netfilter-persistent; then
+  systemctl enable netfilter-persistent 2>/dev/null || true
+fi
 
 # Configure NetworkManager to not interfere with wlan0
 # SafeHarbor manages wlan0 directly for hotspot and home network modes
