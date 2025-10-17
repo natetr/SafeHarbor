@@ -364,6 +364,8 @@ max_num_sta=${config.connection_limit || 10}
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
+dhcp-leasefile=/tmp/dnsmasq.leases
+pid-file=/tmp/dnsmasq.pid
 
 # Main domain resolution
 address=/${hotspotDomain}/192.168.4.1
@@ -470,32 +472,60 @@ async function applyHomeNetworkConfig(config) {
     await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT || true`);
     await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT || true`);
 
-    // Stop any wpa_supplicant/dhclient processes
+    // Stop any wpa_supplicant/dhclient/dhcpcd processes
     await execAsync('sudo killall wpa_supplicant || true');
     await execAsync('sudo killall dhclient || true');
+    await execAsync('sudo killall dhcpcd || true');
 
     // Bring interface down cleanly
     await execAsync(`sudo ip link set ${INTERFACE} down`);
     await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
 
-    // Create wpa_supplicant configuration
-    const wpaConf = `
+    // Check if WiFi is blocked by rfkill
+    try {
+      const { stdout: rfkillStatus } = await execAsync('rfkill list wifi 2>/dev/null || true');
+      if (rfkillStatus.includes('Soft blocked: yes') || rfkillStatus.includes('Hard blocked: yes')) {
+        console.log('  Unblocking WiFi interface...');
+        await execAsync('sudo rfkill unblock wifi');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    } catch (err) {
+      // rfkill not available, continue
+    }
+
+    // Create wpa_supplicant configuration with proper ctrl_interface
+    const wpaConf = `ctrl_interface=/var/run/wpa_supplicant
+ctrl_interface_group=netdev
+update_config=1
+country=US
+
 network={
     ssid="${config.home_network_ssid}"
     psk="${config.home_network_password}"
     key_mgmt=WPA-PSK
+    proto=RSN WPA
+    pairwise=CCMP TKIP
+    group=CCMP TKIP
 }
 `;
     fs.writeFileSync('/tmp/wpa_supplicant.conf', wpaConf);
     await execAsync('sudo chmod 600 /tmp/wpa_supplicant.conf');
 
+    // Ensure control interface directory exists
+    await execAsync('sudo mkdir -p /var/run/wpa_supplicant');
+    await execAsync('sudo chown root:netdev /var/run/wpa_supplicant');
+    await execAsync('sudo chmod 770 /var/run/wpa_supplicant');
+
     // Bring interface up
     await execAsync(`sudo ip link set ${INTERFACE} up`);
 
-    // Start wpa_supplicant
+    // Wait for interface to be ready
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Start wpa_supplicant with control interface
     console.log(`  Connecting to "${config.home_network_ssid}"...`);
     await execAsync(
-      `sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf -D nl80211,wext`
+      `sudo wpa_supplicant -B -i ${INTERFACE} -c /tmp/wpa_supplicant.conf -D nl80211,wext -s`
     );
 
     // Wait for connection
@@ -512,11 +542,27 @@ network={
       throw new Error(`WiFi authentication failed: ${err.message}`);
     }
 
-    // Get IP address via DHCP
+    // Get IP address via DHCP (try dhclient first, then dhcpcd)
     console.log('  Requesting IP address...');
-    await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: 15000 });
+    let dhcpSuccess = false;
 
-    // Wait a moment for DHCP
+    try {
+      // Try dhclient first
+      await execAsync(`sudo dhclient -v ${INTERFACE}`, { timeout: 15000 });
+      dhcpSuccess = true;
+    } catch (err) {
+      console.log('  dhclient failed, trying dhcpcd...');
+      try {
+        // Fallback to dhcpcd (common on Raspberry Pi OS)
+        await execAsync(`sudo dhcpcd ${INTERFACE}`, { timeout: 15000 });
+        dhcpSuccess = true;
+      } catch (dhcpcdErr) {
+        console.warn('  Warning: Could not obtain IP via DHCP automatically');
+        // Continue anyway - the interface might get an IP through other means
+      }
+    }
+
+    // Wait for DHCP to complete
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Verify we have an IP address
@@ -554,6 +600,7 @@ network={
     try {
       await execAsync('sudo killall wpa_supplicant || true');
       await execAsync('sudo killall dhclient || true');
+      await execAsync('sudo killall dhcpcd || true');
       await execAsync('sudo rm -f /tmp/wpa_supplicant.conf');
     } catch (cleanupErr) {
       // Ignore cleanup errors
