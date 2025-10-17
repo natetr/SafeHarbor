@@ -18,11 +18,15 @@ fi
 # Update system
 echo "Updating system..."
 apt-get update
-apt-get upgrade -y
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+
+# Pre-configure iptables-persistent to save current rules automatically
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 
 # Install dependencies
 echo "Installing dependencies..."
-apt-get install -y \
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
   nodejs \
   npm \
   hostapd \
