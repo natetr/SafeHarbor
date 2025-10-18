@@ -3,15 +3,34 @@ import { useState, useEffect } from 'react';
 export default function AdminNetwork() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState(null);
+  const [availableNetworks, setAvailableNetworks] = useState([]);
+  const [savedConnections, setSavedConnections] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [applying, setApplying] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [platformInfo, setPlatformInfo] = useState(null);
+  const [showPasswordHotspot, setShowPasswordHotspot] = useState(false);
+  const [showPasswordWiFi, setShowPasswordWiFi] = useState(false);
+  const [showAddNetworkModal, setShowAddNetworkModal] = useState(false);
+  const [newNetwork, setNewNetwork] = useState({ ssid: '', password: '' });
+  const [showNewNetworkPassword, setShowNewNetworkPassword] = useState(false);
 
   useEffect(() => {
     fetchConfig();
     fetchStatus();
     fetchPlatformInfo();
+
+    // Auto-refresh status every 15 seconds
+    const interval = setInterval(fetchStatus, 15000);
+    return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    // Load WiFi data when switching to WiFi mode
+    if (config?.mode === 'wifi') {
+      scanNetworks();
+      fetchSavedConnections();
+    }
+  }, [config?.mode]);
 
   const fetchConfig = async () => {
     try {
@@ -52,11 +71,40 @@ export default function AdminNetwork() {
     }
   };
 
+  const scanNetworks = async () => {
+    setScanning(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/network/wifi/scan', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setAvailableNetworks(data.networks || []);
+    } catch (err) {
+      console.error('Failed to scan networks:', err);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const fetchSavedConnections = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/network/wifi/connections', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      setSavedConnections(data.connections || []);
+    } catch (err) {
+      console.error('Failed to fetch saved connections:', err);
+    }
+  };
+
   const handleConfigChange = (field, value) => {
     setConfig({ ...config, [field]: value });
   };
 
-  const handleSave = async () => {
+  const handleSaveConfig = async () => {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
@@ -70,10 +118,11 @@ export default function AdminNetwork() {
       });
 
       if (response.ok) {
-        alert('Configuration saved! Click "Apply Changes" to activate the new network mode.');
+        alert('Configuration saved successfully!');
         fetchConfig();
       } else {
-        alert('Failed to save configuration');
+        const data = await response.json();
+        alert('Failed to save configuration: ' + (data.error || 'Unknown error'));
       }
     } catch (err) {
       console.error('Save failed:', err);
@@ -83,180 +132,302 @@ export default function AdminNetwork() {
     }
   };
 
-  const handleApply = async () => {
-    if (!platformInfo?.canConfigure) {
-      alert(`Cannot apply network changes: ${platformInfo?.reason || 'Platform not supported'}`);
+  const handleStartHotspot = async () => {
+    if (!confirm('Start hotspot mode? This will disconnect from any current WiFi network.')) {
       return;
     }
 
-    const mode = config.mode === 'hotspot' ? 'Hotspot Mode' : 'Home Network Mode';
-
-    // Build detailed warning message based on mode
-    let warning;
-    let nextSteps;
-
-    if (config.mode === 'hotspot') {
-      warning = `This will configure the Raspberry Pi as a Wi-Fi hotspot.\n\n` +
-                `Hotspot Network: ${config.hotspot_ssid}\n` +
-                `Domain: ${config.hotspot_domain || 'safeharbor.local'}\n\n` +
-                `⚠️  IMPORTANT - What happens next:\n` +
-                `1. The device will disconnect from the current network\n` +
-                `2. This page will become inaccessible temporarily\n` +
-                `3. Wait 30-60 seconds for the hotspot to start\n` +
-                `4. Look for WiFi network "${config.hotspot_ssid}" on your device\n` +
-                `5. Connect to "${config.hotspot_ssid}"\n` +
-                `6. Access SafeHarbor at: http://${config.hotspot_domain || 'safeharbor.local'}:3000\n\n` +
-                `Note: Hotspot mode doesn't provide WiFi internet. If you need to download ZIM files, use Ethernet or switch to Home Network mode.`;
-      nextSteps = `After clicking OK:\n• This page will disconnect\n• Wait for hotspot "${config.hotspot_ssid}" to appear\n• Connect and visit http://${config.hotspot_domain || 'safeharbor.local'}:3000`;
-    } else {
-      warning = `This will connect the Raspberry Pi to your home network.\n\n` +
-                `Network: ${config.home_network_ssid}\n\n` +
-                `⚠️  IMPORTANT - What happens next:\n` +
-                `1. The device will disconnect from the current network\n` +
-                `2. This page will become inaccessible temporarily\n` +
-                `3. The device will attempt to connect to "${config.home_network_ssid}"\n` +
-                `4. If connection succeeds:\n` +
-                `   - Connect your device to the same WiFi network\n` +
-                `   - Access SafeHarbor using the device's IP address\n` +
-                `   - Check your router for the IP, or use: http://safeharbor.local:3000\n` +
-                `5. If connection fails:\n` +
-                `   - The device will automatically fall back to hotspot mode\n` +
-                `   - Look for hotspot "${config.hotspot_ssid}"\n` +
-                `   - Reconnect and check network settings\n\n` +
-                `⚠️  Make sure your WiFi password is correct!`;
-      nextSteps = `After clicking OK:\n• This page will disconnect\n• Device attempts to connect to "${config.home_network_ssid}"\n• If successful, reconnect and find the new IP\n• If failed, device falls back to hotspot mode`;
-    }
-
-    if (!confirm(`Apply ${mode}?\n\n${warning}\n\nContinue?`)) {
-      return;
-    }
-
-    // Show detailed next steps
-    alert(nextSteps);
-
-    setApplying(true);
+    setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('/api/network/apply', {
+
+      // First save the config
+      await fetch('/api/network/config', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(config)
+      });
+
+      // Then switch to hotspot mode
+      const response = await fetch('/api/network/mode/switch', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
-        }
+        },
+        body: JSON.stringify({ mode: 'hotspot' })
+      });
+
+      if (response.ok) {
+        alert(`Hotspot "${config.hotspot_ssid || 'SafeHarbor'}" is now active!\n\nConnect to this network to access SafeHarbor at:\nhttp://${config.hotspot_domain || 'safeharbor.local'}:3000`);
+        fetchConfig();
+        fetchStatus();
+      } else {
+        const data = await response.json();
+        alert('Failed to start hotspot: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Failed to start hotspot:', err);
+      alert('Failed to start hotspot: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStopHotspot = async () => {
+    if (!confirm('Stop hotspot mode? Clients will be disconnected.')) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/network/hotspot/stop', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        alert('Hotspot stopped successfully');
+        fetchStatus();
+      } else {
+        const data = await response.json();
+        alert('Failed to stop hotspot: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Failed to stop hotspot:', err);
+      alert('Failed to stop hotspot: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConnectWiFi = async (ssid, password = null) => {
+    setLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+
+      // First switch to WiFi mode
+      await fetch('/api/network/mode/switch', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ mode: 'wifi' })
+      });
+
+      // Then connect to the specific network
+      const response = await fetch('/api/network/wifi/connect', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ ssid, password })
       });
 
       const data = await response.json();
 
-      if (response.ok) {
-        if (config.mode === 'hotspot') {
-          alert(
-            `Network configuration is being applied!\n\n` +
-            `The device is switching to hotspot mode.\n\n` +
-            `NEXT STEPS:\n` +
-            `1. This page will disconnect in a moment\n` +
-            `2. Wait 30-60 seconds\n` +
-            `3. Look for WiFi network: "${config.hotspot_ssid}"\n` +
-            `4. Connect to it\n` +
-            `5. Visit: http://${config.hotspot_domain || 'safeharbor.local'}:3000\n` +
-            `   or http://192.168.4.1:3000`
-          );
-        } else {
-          alert(
-            `Network configuration is being applied!\n\n` +
-            `The device is attempting to connect to: ${config.home_network_ssid}\n\n` +
-            `NEXT STEPS:\n` +
-            `1. This page will disconnect in a moment\n` +
-            `2. Wait 30-60 seconds for connection attempt\n` +
-            `3. Connect your device to the same WiFi: ${config.home_network_ssid}\n` +
-            `4. Find the device's new IP (check your router or use mDNS)\n` +
-            `5. Visit: http://safeharbor.local:3000 or http://<device-ip>:3000\n\n` +
-            `If connection fails, the device will automatically switch back to hotspot mode.\n` +
-            `Look for hotspot: "${config.hotspot_ssid}"`
-          );
-        }
-
-        // Refresh status after a delay to allow network to stabilize
-        setTimeout(() => {
-          fetchStatus();
-        }, 5000);
+      if (data.success) {
+        alert(`Successfully connected to ${ssid}!`);
+        fetchConfig();
+        fetchStatus();
       } else {
-        alert('Failed to apply network changes:\n\n' + (data.error || 'Unknown error'));
+        alert('Failed to connect: ' + data.message);
       }
     } catch (err) {
-      console.error('Apply failed:', err);
-      alert('Failed to apply network changes:\n\n' + err.message);
+      console.error('Failed to connect:', err);
+      alert('Failed to connect: ' + err.message);
     } finally {
-      setApplying(false);
+      setLoading(false);
     }
+  };
+
+  const handleDisconnectWiFi = async () => {
+    if (!confirm('Disconnect from current WiFi network?')) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/network/wifi/disconnect', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        alert('Disconnected from WiFi');
+        fetchStatus();
+      } else {
+        const data = await response.json();
+        alert('Failed to disconnect: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Failed to disconnect:', err);
+      alert('Failed to disconnect: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleForgetNetwork = async (connectionName) => {
+    if (!confirm(`Forget saved network "${connectionName}"?`)) {
+      return;
+    }
+
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/network/wifi/connection/${encodeURIComponent(connectionName)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        alert(`Network "${connectionName}" forgotten`);
+        fetchSavedConnections();
+      } else {
+        const data = await response.json();
+        alert('Failed to forget network: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Failed to forget network:', err);
+      alert('Failed to forget network: ' + err.message);
+    }
+  };
+
+  const handleAddNewNetwork = () => {
+    setNewNetwork({ ssid: '', password: '' });
+    setShowNewNetworkPassword(false);
+    setShowAddNetworkModal(true);
+  };
+
+  const handleSaveNewNetwork = async () => {
+    if (!newNetwork.ssid) {
+      alert('Please enter a network name (SSID)');
+      return;
+    }
+
+    setShowAddNetworkModal(false);
+    await handleConnectWiFi(newNetwork.ssid, newNetwork.password);
   };
 
   if (!config) return <div>Loading...</div>;
 
+  const isHotspotMode = config.mode === 'hotspot';
+  const isWiFiMode = config.mode === 'wifi';
+
   return (
     <div>
-      <h1 className="mb-3">Network Configuration</h1>
+      <h1 className="mb-3">Network Settings</h1>
 
-      <div className="card mb-3">
-        <h2 className="card-header">Current Status</h2>
-        {status ? (
-          <div>
-            <p><strong>Mode:</strong> {status.mode || 'Unknown'}</p>
-            <p><strong>Connected:</strong> {status.connected ? 'Yes' : 'No'}</p>
-            {status.ip && <p><strong>IP Address:</strong> {status.ip}</p>}
-            {status.ssid && <p><strong>Network:</strong> {status.ssid}</p>}
-          </div>
-        ) : (
-          <p className="text-muted">Loading status...</p>
-        )}
-      </div>
+      {platformInfo && !platformInfo.canConfigure && (
+        <div className="card mb-3" style={{ backgroundColor: '#fff3cd', borderColor: '#ffc107' }}>
+          <p style={{ margin: 0, color: '#856404' }}>
+            <strong>Note:</strong> Network configuration is not available on this platform ({platformInfo.reason})
+          </p>
+        </div>
+      )}
 
+      {/* Mode Selection */}
       <div className="card mb-3">
         <h2 className="card-header">Network Mode</h2>
         <div className="form-group">
-          <label className="form-label">Select Mode</label>
-          <select
-            className="form-select"
-            value={config.mode}
-            onChange={(e) => handleConfigChange('mode', e.target.value)}
-          >
-            <option value="hotspot">Hotspot Mode (Create Wi-Fi Network)</option>
-            <option value="home">Home Network Mode (Connect to Existing Wi-Fi)</option>
-          </select>
+          <label style={{ display: 'flex', alignItems: 'center', marginBottom: '0.75rem' }}>
+            <input
+              type="radio"
+              name="mode"
+              value="hotspot"
+              checked={isHotspotMode}
+              onChange={(e) => handleConfigChange('mode', e.target.value)}
+              style={{ marginRight: '0.5rem' }}
+            />
+            <strong>Hotspot Mode</strong> - Create a WiFi network for local access
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center' }}>
+            <input
+              type="radio"
+              name="mode"
+              value="wifi"
+              checked={isWiFiMode}
+              onChange={(e) => handleConfigChange('mode', e.target.value)}
+              style={{ marginRight: '0.5rem' }}
+            />
+            <strong>Wi-Fi Mode</strong> - Connect to an existing WiFi network
+          </label>
         </div>
       </div>
 
-      {config.mode === 'hotspot' && (
+      {/* Hotspot Mode Panel */}
+      {isHotspotMode && (
         <div className="card mb-3">
           <h2 className="card-header">Hotspot Settings</h2>
+
           <div className="form-group">
-            <label className="form-label">Network Name (SSID)</label>
+            <label className="form-label">Hotspot Name (SSID)</label>
             <input
               type="text"
               className="form-input"
-              value={config.hotspot_ssid || ''}
+              value={config.hotspot_ssid || 'SafeHarbor'}
               onChange={(e) => handleConfigChange('hotspot_ssid', e.target.value)}
+              placeholder="SafeHarbor"
             />
           </div>
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={config.broadcast_ssid !== 0}
+                onChange={(e) => handleConfigChange('broadcast_ssid', e.target.checked ? 1 : 0)}
+                style={{ marginRight: '0.5rem' }}
+              />
+              Broadcast SSID (make network visible)
+            </label>
+            {config.broadcast_ssid === 0 && (
+              <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+                Network is hidden - users must manually enter the SSID to connect
+              </p>
+            )}
+          </div>
+
           <div className="form-group">
             <label className="form-label">Password</label>
-            <input
-              type="text"
-              className="form-input"
-              value={config.hotspot_password || ''}
-              onChange={(e) => handleConfigChange('hotspot_password', e.target.value)}
-            />
+            <div style={{ position: 'relative' }}>
+              <input
+                type={showPasswordHotspot ? 'text' : 'password'}
+                className="form-input"
+                value={config.hotspot_password || 'safeharbor'}
+                onChange={(e) => handleConfigChange('hotspot_password', e.target.value)}
+                placeholder="safeharbor"
+                style={{ paddingRight: '2.5rem' }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPasswordHotspot(!showPasswordHotspot)}
+                style={{
+                  position: 'absolute',
+                  right: '0.5rem',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: '1rem'
+                }}
+                title={showPasswordHotspot ? 'Hide password' : 'Show password'}
+              >
+                {showPasswordHotspot ? '👁️' : '👁️‍🗨️'}
+              </button>
+            </div>
           </div>
+
           <div className="form-group">
-            <label className="form-label">Connection Limit</label>
-            <input
-              type="number"
-              className="form-input"
-              value={config.connection_limit || 10}
-              onChange={(e) => handleConfigChange('connection_limit', parseInt(e.target.value))}
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Hotspot Domain Name</label>
+            <label className="form-label">Local URL</label>
             <input
               type="text"
               className="form-input"
@@ -265,68 +436,346 @@ export default function AdminNetwork() {
               placeholder="safeharbor.local"
             />
             <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
-              The domain name users can type in their browser to access SafeHarbor.
-              Examples: safeharbor.local, safeharbor.com, library.local
+              Users can access SafeHarbor by typing this address in their browser
             </p>
           </div>
+
           <div className="form-group">
-            <label className="form-label">Landing Page URL</label>
-            <input
-              type="text"
-              className="form-input"
-              value={config.landing_url || '/'}
-              onChange={(e) => handleConfigChange('landing_url', e.target.value)}
-              placeholder="/"
-            />
+            <label style={{ display: 'flex', alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={config.lan_passthrough !== 0}
+                onChange={(e) => handleConfigChange('lan_passthrough', e.target.checked ? 1 : 0)}
+                style={{ marginRight: '0.5rem' }}
+              />
+              LAN Internet Passthrough
+            </label>
             <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
-              Users connecting to the hotspot will be automatically directed to this URL.
-              Examples: / (home), /zim/wikipedia (specific ZIM)
+              Allow connected clients to access the internet via Ethernet connection
             </p>
           </div>
+
+          <div className="form-group">
+            <label className="form-label">Maximum Connected Clients</label>
+            <input
+              type="number"
+              className="form-input"
+              value={config.connection_limit || 10}
+              onChange={(e) => handleConfigChange('connection_limit', parseInt(e.target.value))}
+              min="1"
+              max="50"
+            />
+          </div>
+
+          <div className="flex gap-2" style={{ marginTop: '1rem' }}>
+            <button
+              onClick={handleSaveConfig}
+              disabled={loading}
+              className="btn btn-primary"
+            >
+              {loading ? 'Saving...' : 'Save Settings'}
+            </button>
+            {status?.hotspot?.active ? (
+              <button
+                onClick={handleStopHotspot}
+                disabled={loading}
+                className="btn btn-secondary"
+              >
+                Stop Hotspot
+              </button>
+            ) : (
+              <button
+                onClick={handleStartHotspot}
+                disabled={loading || !platformInfo?.canConfigure}
+                className="btn btn-success"
+              >
+                Start Hotspot
+              </button>
+            )}
+          </div>
+
+          {/* Hotspot Status */}
+          <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
+            <h3 style={{ marginTop: 0, fontSize: '1rem', marginBottom: '0.5rem' }}>Status</h3>
+            {status?.hotspot?.active ? (
+              <div>
+                <p style={{ margin: '0.25rem 0' }}>✓ Hotspot is active</p>
+                <p style={{ margin: '0.25rem 0' }}>Network: {config.hotspot_ssid || 'SafeHarbor'}</p>
+                <p style={{ margin: '0.25rem 0' }}>Visibility: {config.broadcast_ssid !== 0 ? 'Visible' : 'Hidden'}</p>
+                <p style={{ margin: '0.25rem 0' }}>Access URL: http://{config.hotspot_domain || 'safeharbor.local'}:3000</p>
+                <p style={{ margin: '0.25rem 0' }}>IP Address: {status.hotspot.ip || '192.168.4.1'}</p>
+                {status.ethernet?.connected && (
+                  <p style={{ margin: '0.25rem 0' }}>LAN: Connected ({status.ethernet.ip})</p>
+                )}
+                <p style={{ margin: '0.25rem 0' }}>Connected Clients: {status.hotspot.clients || 0}</p>
+              </div>
+            ) : (
+              <p style={{ margin: 0 }}>Hotspot is not active</p>
+            )}
+          </div>
         </div>
       )}
 
-      {config.mode === 'home' && (
+      {/* WiFi Mode Panel */}
+      {isWiFiMode && (
         <div className="card mb-3">
-          <h2 className="card-header">Home Network Settings</h2>
+          <h2 className="card-header">Wi-Fi Settings</h2>
+
           <div className="form-group">
-            <label className="form-label">Wi-Fi Network Name (SSID)</label>
-            <input
-              type="text"
-              className="form-input"
-              value={config.home_network_ssid || ''}
-              onChange={(e) => handleConfigChange('home_network_ssid', e.target.value)}
-            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <label className="form-label" style={{ margin: 0 }}>Available Networks</label>
+              <button
+                onClick={scanNetworks}
+                disabled={scanning}
+                className="btn btn-sm"
+                style={{ padding: '0.25rem 0.75rem' }}
+              >
+                {scanning ? 'Scanning...' : 'Refresh'}
+              </button>
+            </div>
+            {availableNetworks.length > 0 ? (
+              <div style={{ border: '1px solid #ddd', borderRadius: '4px', maxHeight: '200px', overflowY: 'auto' }}>
+                {availableNetworks.map((network, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      padding: '0.75rem',
+                      borderBottom: idx < availableNetworks.length - 1 ? '1px solid #eee' : 'none',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                      backgroundColor: status?.wifi?.ssid === network.ssid ? '#e7f3ff' : 'transparent'
+                    }}
+                    onClick={() => {
+                      const password = prompt(`Enter password for "${network.ssid}"`);
+                      if (password !== null) {
+                        handleConnectWiFi(network.ssid, password || undefined);
+                      }
+                    }}
+                  >
+                    <div>
+                      <strong>{network.ssid}</strong>
+                      <div style={{ fontSize: '0.875rem', color: '#666' }}>
+                        Signal: {network.signal}% • {network.secured ? 'Secured' : 'Open'}
+                      </div>
+                    </div>
+                    {status?.wifi?.ssid === network.ssid && (
+                      <span style={{ color: '#28a745', fontWeight: 'bold' }}>Connected</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-muted">No networks found. Click Refresh to scan.</p>
+            )}
           </div>
+
           <div className="form-group">
-            <label className="form-label">Wi-Fi Password</label>
-            <input
-              type="password"
-              className="form-input"
-              value={config.home_network_password || ''}
-              onChange={(e) => handleConfigChange('home_network_password', e.target.value)}
-            />
+            <button
+              onClick={handleAddNewNetwork}
+              className="btn btn-secondary"
+              style={{ width: '100%' }}
+            >
+              Add New Network
+            </button>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Saved Networks</label>
+            {savedConnections.length > 0 ? (
+              <div style={{ border: '1px solid #ddd', borderRadius: '4px' }}>
+                {savedConnections.map((conn, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      padding: '0.75rem',
+                      borderBottom: idx < savedConnections.length - 1 ? '1px solid #eee' : 'none',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}
+                  >
+                    <strong>{conn.name}</strong>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <button
+                        onClick={() => handleConnectWiFi(conn.name)}
+                        className="btn btn-sm"
+                        style={{ padding: '0.25rem 0.75rem' }}
+                      >
+                        Connect
+                      </button>
+                      <button
+                        onClick={() => handleForgetNetwork(conn.name)}
+                        className="btn btn-sm"
+                        style={{ padding: '0.25rem 0.75rem', backgroundColor: '#dc3545', color: 'white' }}
+                      >
+                        Forget
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-muted">No saved networks</p>
+            )}
+          </div>
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={config.auto_reconnect !== 0}
+                onChange={(e) => handleConfigChange('auto_reconnect', e.target.checked ? 1 : 0)}
+                style={{ marginRight: '0.5rem' }}
+              />
+              Auto-Reconnect
+            </label>
+            <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+              Automatically reconnect when within range of a known network
+            </p>
+          </div>
+
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={config.fallback_to_hotspot !== 0}
+                onChange={(e) => handleConfigChange('fallback_to_hotspot', e.target.checked ? 1 : 0)}
+                style={{ marginRight: '0.5rem' }}
+              />
+              Fallback to Hotspot
+            </label>
+            <p className="text-muted" style={{ fontSize: '0.875rem', marginTop: '0.25rem' }}>
+              Automatically switch to hotspot mode if WiFi connection fails
+            </p>
+          </div>
+
+          <div className="flex gap-2" style={{ marginTop: '1rem' }}>
+            <button
+              onClick={handleSaveConfig}
+              disabled={loading}
+              className="btn btn-primary"
+            >
+              {loading ? 'Saving...' : 'Save Settings'}
+            </button>
+            {status?.wifi?.connected && (
+              <button
+                onClick={handleDisconnectWiFi}
+                disabled={loading}
+                className="btn btn-secondary"
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
+
+          {/* WiFi Status */}
+          <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
+            <h3 style={{ marginTop: 0, fontSize: '1rem', marginBottom: '0.5rem' }}>Status</h3>
+            {status?.wifi?.connected ? (
+              <div>
+                <p style={{ margin: '0.25rem 0' }}>✓ Connected to WiFi</p>
+                <p style={{ margin: '0.25rem 0' }}>Network: {status.wifi.ssid}</p>
+                <p style={{ margin: '0.25rem 0' }}>IP Address: {status.wifi.ip}</p>
+                {status.wifi.signal && (
+                  <p style={{ margin: '0.25rem 0' }}>Signal Strength: {status.wifi.signal}%</p>
+                )}
+                {status.ethernet?.connected && (
+                  <p style={{ margin: '0.25rem 0' }}>LAN: Connected ({status.ethernet.ip})</p>
+                )}
+                {config.fallback_to_hotspot !== 0 && (
+                  <p style={{ margin: '0.25rem 0' }}>Fallback: Enabled</p>
+                )}
+              </div>
+            ) : (
+              <div>
+                <p style={{ margin: '0.25rem 0' }}>Not connected to WiFi</p>
+                {status?.ethernet?.connected && (
+                  <p style={{ margin: '0.25rem 0' }}>LAN: Connected ({status.ethernet.ip})</p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      <div className="flex gap-2">
-        <button
-          onClick={handleSave}
-          disabled={loading}
-          className="btn btn-primary"
-        >
-          {loading ? 'Saving...' : 'Save Configuration'}
-        </button>
-        <button
-          onClick={handleApply}
-          disabled={applying || !platformInfo?.canConfigure}
-          className="btn btn-secondary"
-          title={!platformInfo?.canConfigure ? platformInfo?.reason : 'Apply network configuration'}
-        >
-          {applying ? 'Applying...' : 'Apply Changes'}
-        </button>
-      </div>
+      {/* Add Network Modal */}
+      {showAddNetworkModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 1000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            padding: '2rem',
+            borderRadius: '8px',
+            maxWidth: '500px',
+            width: '90%'
+          }}>
+            <h2 style={{ marginTop: 0 }}>Add New Network</h2>
+
+            <div className="form-group">
+              <label className="form-label">Network Name (SSID)</label>
+              <input
+                type="text"
+                className="form-input"
+                value={newNetwork.ssid}
+                onChange={(e) => setNewNetwork({ ...newNetwork, ssid: e.target.value })}
+                placeholder="Enter SSID"
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Password (leave blank if open network)</label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  type={showNewNetworkPassword ? 'text' : 'password'}
+                  className="form-input"
+                  value={newNetwork.password}
+                  onChange={(e) => setNewNetwork({ ...newNetwork, password: e.target.value })}
+                  placeholder="Enter password"
+                  style={{ paddingRight: '2.5rem' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewNetworkPassword(!showNewNetworkPassword)}
+                  style={{
+                    position: 'absolute',
+                    right: '0.5rem',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '1rem'
+                  }}
+                  title={showNewNetworkPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showNewNetworkPassword ? '👁️' : '👁️‍🗨️'}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex gap-2" style={{ marginTop: '1.5rem' }}>
+              <button onClick={handleSaveNewNetwork} className="btn btn-primary">
+                Connect
+              </button>
+              <button onClick={() => setShowAddNetworkModal(false)} className="btn btn-secondary">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

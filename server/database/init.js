@@ -613,9 +613,14 @@ export function initDatabase() {
       hotspot_ssid TEXT,
       hotspot_password TEXT,
       hotspot_open BOOLEAN DEFAULT 0,
+      broadcast_ssid BOOLEAN DEFAULT 1,
+      hotspot_domain TEXT DEFAULT 'safeharbor.local',
       connection_limit INTEGER DEFAULT 10,
+      lan_passthrough BOOLEAN DEFAULT 1,
       home_network_ssid TEXT,
       home_network_password TEXT,
+      auto_reconnect BOOLEAN DEFAULT 1,
+      fallback_to_hotspot BOOLEAN DEFAULT 0,
       captive_portal BOOLEAN DEFAULT 0,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -755,6 +760,28 @@ export function initDatabase() {
   // Add hotspot_domain column to network_config for customizable domain name
   try {
     db.exec(`ALTER TABLE network_config ADD COLUMN hotspot_domain TEXT DEFAULT 'safeharbor.local'`);
+  } catch (err) {
+    // Column already exists
+  }
+
+  // Add new network configuration columns for redesigned network settings
+  try {
+    db.exec(`ALTER TABLE network_config ADD COLUMN broadcast_ssid BOOLEAN DEFAULT 1`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE network_config ADD COLUMN lan_passthrough BOOLEAN DEFAULT 1`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE network_config ADD COLUMN auto_reconnect BOOLEAN DEFAULT 1`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE network_config ADD COLUMN fallback_to_hotspot BOOLEAN DEFAULT 0`);
   } catch (err) {
     // Column already exists
   }

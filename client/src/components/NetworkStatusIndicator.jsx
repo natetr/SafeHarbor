@@ -5,8 +5,8 @@ export default function NetworkStatusIndicator() {
 
   useEffect(() => {
     fetchStatus();
-    // Refresh status every 30 seconds
-    const interval = setInterval(fetchStatus, 30000);
+    // Refresh status every 15 seconds
+    const interval = setInterval(fetchStatus, 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -24,6 +24,7 @@ export default function NetworkStatusIndicator() {
         setStatus(data);
       }
     } catch (err) {
+      // Silently fail - indicator will show nothing if network status unavailable
       console.error('Failed to fetch network status:', err);
     }
   };
@@ -31,71 +32,109 @@ export default function NetworkStatusIndicator() {
   if (!status) return null;
 
   const getStatusColor = () => {
-    if (status.mode === 'hotspot') return '#4CAF50'; // Green for hotspot
-    if (status.mode === 'home' && status.connected) return '#2196F3'; // Blue for connected home
-    if (status.mode === 'home' && !status.connected) return '#ff9800'; // Orange for disconnected
-    return '#9e9e9e'; // Gray for unknown
-  };
-
-  const getStatusIcon = () => {
-    if (status.mode === 'hotspot') return '📡';
-    if (status.mode === 'home' && status.connected) return '🌐';
-    if (status.mode === 'home' && !status.connected) return '⚠️';
-    return '❓';
+    if (status.mode === 'hotspot') {
+      return status.hotspot?.active ? '#28a745' : '#6c757d'; // Green if active, gray if not
+    }
+    if (status.mode === 'wifi') {
+      if (status.wifi?.connected) return '#007bff'; // Blue for WiFi connected
+      return '#ffc107'; // Yellow for WiFi disconnected (fallback state)
+    }
+    return '#6c757d'; // Gray for unknown
   };
 
   const getStatusText = () => {
     if (status.mode === 'hotspot') {
-      return 'Hotspot Active';
+      if (!status.hotspot?.active) return 'Hotspot: Inactive';
+
+      const config = status.config || {};
+      const visibility = config.broadcast_ssid === 0 ? 'Hidden' : 'Visible';
+      const ssid = config.hotspot_ssid || 'SafeHarbor';
+
+      return `Hotspot: ${ssid} (${visibility})`;
     }
-    if (status.mode === 'home') {
-      if (status.connected) {
-        return 'WiFi Connected';
+
+    if (status.mode === 'wifi') {
+      if (status.wifi?.connected) {
+        return `WiFi: ${status.wifi.ssid}`;
       }
-      return 'Disconnected';
+      // Check for fallback state
+      if (status.fallback_active) {
+        return 'Offline – Fallback Active';
+      }
+      return 'WiFi: Disconnected';
     }
-    return 'Unknown';
+
+    return 'Network: Unknown';
   };
 
   const getTooltipText = () => {
-    if (status.mode === 'hotspot') {
-      const clientCount = status.clients?.length || 0;
-      const ipInfo = status.ip ? ` (${status.ip})` : '';
-      return `Hotspot Mode: ${clientCount} ${clientCount === 1 ? 'client' : 'clients'} connected${ipInfo}`;
+    if (status.mode === 'hotspot' && status.hotspot?.active) {
+      const clientCount = status.hotspot.clients || 0;
+      const ipInfo = status.hotspot.ip ? ` (${status.hotspot.ip})` : '';
+      const lanInfo = status.ethernet?.connected ? `\nLAN: Connected (${status.ethernet.ip})` : '';
+      return `Hotspot Mode: ${clientCount} ${clientCount === 1 ? 'client' : 'clients'} connected${ipInfo}${lanInfo}`;
     }
-    if (status.mode === 'home') {
-      if (status.connected) {
-        const networkName = status.ssid || 'Unknown Network';
-        const ipInfo = status.ip ? ` (${status.ip})` : '';
-        return `Connected to: ${networkName}${ipInfo}`;
+
+    if (status.mode === 'wifi') {
+      if (status.wifi?.connected) {
+        const ipInfo = status.wifi.ip ? ` (${status.wifi.ip})` : '';
+        const signalInfo = status.wifi.signal ? `\nSignal: ${status.wifi.signal}%` : '';
+        const lanInfo = status.ethernet?.connected ? `\nLAN: Connected (${status.ethernet.ip})` : '';
+        return `Connected to: ${status.wifi.ssid}${ipInfo}${signalInfo}${lanInfo}`;
       }
-      return 'Not connected to home network';
+      return 'Not connected to WiFi';
     }
+
     return 'Network status unknown';
   };
 
+  // Additional status indicators
+  const hasLAN = status.ethernet?.connected;
+  const showLAN = hasLAN && status.mode === 'hotspot'; // Only show LAN in hotspot mode for brevity
+
   return (
-    <div
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '0.5rem',
-        padding: '0.375rem 0.75rem',
-        background: getStatusColor(),
-        color: 'white',
-        borderRadius: '4px',
-        fontSize: '0.875rem',
-        fontWeight: '500',
-        cursor: 'pointer',
-        transition: 'opacity 0.2s',
-      }}
-      onClick={() => window.location.href = '/admin/network'}
-      onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
-      onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
-      title={getTooltipText()}
-    >
-      <span>{getStatusIcon()}</span>
-      <span>{getStatusText()}</span>
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+      <div
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          padding: '0.375rem 0.75rem',
+          background: getStatusColor(),
+          color: 'white',
+          borderRadius: '4px',
+          fontSize: '0.875rem',
+          fontWeight: '500',
+          cursor: 'pointer',
+          transition: 'opacity 0.2s',
+          whiteSpace: 'nowrap'
+        }}
+        onClick={() => window.location.href = '/admin/network'}
+        onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
+        onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
+        title={getTooltipText()}
+      >
+        <span>{getStatusText()}</span>
+      </div>
+
+      {/* Optional: Show LAN indicator separately when in hotspot mode */}
+      {showLAN && (
+        <div
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '0.375rem 0.75rem',
+            background: '#17a2b8', // Teal for LAN
+            color: 'white',
+            borderRadius: '4px',
+            fontSize: '0.875rem',
+            fontWeight: '500',
+            whiteSpace: 'nowrap'
+          }}
+          title={`LAN Connected: ${status.ethernet.ip}`}
+        >
+          <span>LAN: Connected</span>
+        </div>
+      )}
     </div>
   );
 }
