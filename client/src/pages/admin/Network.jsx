@@ -211,7 +211,7 @@ export default function AdminNetwork() {
       const token = localStorage.getItem('token');
 
       // First switch to WiFi mode
-      await fetch('/api/network/mode/switch', {
+      const modeResponse = await fetch('/api/network/mode/switch', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -219,6 +219,14 @@ export default function AdminNetwork() {
         },
         body: JSON.stringify({ mode: 'wifi' })
       });
+
+      // Check if mode switch failed
+      if (!modeResponse.ok) {
+        const modeError = await modeResponse.json();
+        alert('Failed to switch to WiFi mode: ' + (modeError.error || 'Unknown error'));
+        setLoading(false);
+        return;
+      }
 
       // Then connect to the specific network
       const response = await fetch('/api/network/wifi/connect', {
@@ -495,7 +503,7 @@ export default function AdminNetwork() {
           </div>
 
           {/* Hotspot Status */}
-          <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
+          <div className="card" style={{ marginTop: '1.5rem' }}>
             <h3 style={{ marginTop: 0, fontSize: '1rem', marginBottom: '0.5rem' }}>Status</h3>
             {status?.hotspot?.active ? (
               <div>
@@ -545,7 +553,7 @@ export default function AdminNetwork() {
                       justifyContent: 'space-between',
                       alignItems: 'center',
                       cursor: 'pointer',
-                      backgroundColor: status?.wifi?.ssid === network.ssid ? '#e7f3ff' : 'transparent'
+                      backgroundColor: status?.wifi?.ssid === network.ssid ? '#d4e9ff' : 'transparent'
                     }}
                     onClick={() => {
                       const password = prompt(`Enter password for "${network.ssid}"`);
@@ -596,14 +604,22 @@ export default function AdminNetwork() {
                       alignItems: 'center'
                     }}
                   >
-                    <strong>{conn.name}</strong>
+                    <div>
+                      <strong>{conn.name}</strong>
+                      {status?.wifi?.ssid === conn.name && (
+                        <span style={{ marginLeft: '0.5rem', color: '#28a745', fontSize: '0.875rem' }}>
+                          (Connected)
+                        </span>
+                      )}
+                    </div>
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
                       <button
                         onClick={() => handleConnectWiFi(conn.name)}
+                        disabled={status?.wifi?.ssid === conn.name}
                         className="btn btn-sm"
                         style={{ padding: '0.25rem 0.75rem' }}
                       >
-                        Connect
+                        {status?.wifi?.ssid === conn.name ? 'Connected' : 'Connect'}
                       </button>
                       <button
                         onClick={() => handleForgetNetwork(conn.name)}
@@ -671,7 +687,7 @@ export default function AdminNetwork() {
           </div>
 
           {/* WiFi Status */}
-          <div style={{ marginTop: '1.5rem', padding: '1rem', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
+          <div className="card" style={{ marginTop: '1.5rem' }}>
             <h3 style={{ marginTop: 0, fontSize: '1rem', marginBottom: '0.5rem' }}>Status</h3>
             {status?.wifi?.connected ? (
               <div>
