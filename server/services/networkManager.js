@@ -171,13 +171,13 @@ export async function getHotspotStatus() {
 export async function scanNetworks() {
   try {
     // Trigger a scan
-    await execAsync('nmcli device wifi rescan 2>/dev/null || true');
+    await execAsync('sudo nmcli device wifi rescan 2>/dev/null || true');
 
     // Wait for scan to complete
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Get list of networks
-    const { stdout } = await execAsync('nmcli -t -f SSID,SIGNAL,SECURITY device wifi list');
+    const { stdout } = await execAsync('sudo nmcli -t -f SSID,SIGNAL,SECURITY device wifi list');
 
     const networks = stdout
       .split('\n')
@@ -217,7 +217,7 @@ export async function scanNetworks() {
  */
 export async function getSavedConnections() {
   try {
-    const { stdout } = await execAsync('nmcli -t -f NAME,TYPE connection show');
+    const { stdout } = await execAsync('sudo nmcli -t -f NAME,TYPE connection show');
 
     const connections = stdout
       .split('\n')
@@ -240,10 +240,10 @@ export async function getSavedConnections() {
 export async function connectToWiFi(ssid, password = null) {
   try {
     // Ensure interface is managed by NetworkManager
-    await execAsync(`nmcli device set ${INTERFACE} managed yes`);
+    await execAsync(`sudo nmcli device set ${INTERFACE} managed yes`);
 
     // Build connection command
-    let command = `nmcli device wifi connect "${ssid}"`;
+    let command = `sudo nmcli device wifi connect "${ssid}"`;
     if (password) {
       command += ` password "${password}"`;
     }
@@ -278,7 +278,7 @@ export async function connectToWiFi(ssid, password = null) {
  */
 export async function disconnectWiFi() {
   try {
-    await execAsync(`nmcli device disconnect ${INTERFACE}`);
+    await execAsync(`sudo nmcli device disconnect ${INTERFACE}`);
     return {
       success: true,
       message: 'Disconnected from WiFi'
@@ -297,7 +297,7 @@ export async function disconnectWiFi() {
  */
 export async function deleteConnection(connectionName) {
   try {
-    await execAsync(`nmcli connection delete "${connectionName}"`);
+    await execAsync(`sudo nmcli connection delete "${connectionName}"`);
     return {
       success: true,
       message: `Connection "${connectionName}" deleted`
@@ -325,20 +325,20 @@ export async function startHotspot(config) {
     console.log('Starting hotspot mode...');
 
     // Stop any existing hotspot services
-    await execAsync('killall hostapd 2>/dev/null || true');
-    await execAsync('killall dnsmasq 2>/dev/null || true');
-    await execAsync('killall wpa_supplicant 2>/dev/null || true');
+    await execAsync('sudo killall hostapd 2>/dev/null || true');
+    await execAsync('sudo killall dnsmasq 2>/dev/null || true');
+    await execAsync('sudo killall wpa_supplicant 2>/dev/null || true');
 
     // Set NetworkManager to unmanaged mode for wlan0
-    await execAsync(`nmcli device set ${INTERFACE} managed no`);
+    await execAsync(`sudo nmcli device set ${INTERFACE} managed no`);
 
     // Wait for interface to settle
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     // Configure interface
-    await execAsync(`ip addr flush dev ${INTERFACE}`);
-    await execAsync(`ip addr add 192.168.4.1/24 dev ${INTERFACE}`);
-    await execAsync(`ip link set ${INTERFACE} up`);
+    await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
+    await execAsync(`sudo ip addr add 192.168.4.1/24 dev ${INTERFACE}`);
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
 
     // Create hostapd configuration
     const broadcast = config.broadcast_ssid !== false ? 0 : 1; // 0 = visible, 1 = hidden
@@ -379,14 +379,14 @@ address=/www.msftconnecttest.com/192.168.4.1
     fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
 
     // Start hostapd
-    await execAsync('hostapd /tmp/hostapd.conf -B');
+    await execAsync('sudo hostapd /tmp/hostapd.conf -B');
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Verify hostapd is running
     await execAsync('pidof hostapd');
 
     // Start dnsmasq
-    await execAsync('dnsmasq -C /tmp/dnsmasq.conf');
+    await execAsync('sudo dnsmasq -C /tmp/dnsmasq.conf');
 
     // Configure hostname for mDNS
     await setHostname(domain);
@@ -407,8 +407,8 @@ address=/www.msftconnecttest.com/192.168.4.1
     console.error('Error starting hotspot:', err);
 
     // Cleanup on failure
-    await execAsync('killall hostapd 2>/dev/null || true');
-    await execAsync('killall dnsmasq 2>/dev/null || true');
+    await execAsync('sudo killall hostapd 2>/dev/null || true');
+    await execAsync('sudo killall dnsmasq 2>/dev/null || true');
 
     return {
       success: false,
@@ -426,15 +426,15 @@ export async function stopHotspot() {
     console.log('Stopping hotspot mode...');
 
     // Stop services
-    await execAsync('killall hostapd 2>/dev/null || true');
-    await execAsync('killall dnsmasq 2>/dev/null || true');
+    await execAsync('sudo killall hostapd 2>/dev/null || true');
+    await execAsync('sudo killall dnsmasq 2>/dev/null || true');
 
     // Clean up iptables rules
     await disableLANPassthrough();
 
     // Reset interface
-    await execAsync(`ip addr flush dev ${INTERFACE}`);
-    await execAsync(`ip link set ${INTERFACE} down`);
+    await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
+    await execAsync(`sudo ip link set ${INTERFACE} down`);
 
     console.log('Hotspot mode stopped');
     return {
@@ -466,12 +466,12 @@ export async function enableLANPassthrough() {
     }
 
     // Enable IP forwarding
-    await execAsync('echo 1 | tee /proc/sys/net/ipv4/ip_forward > /dev/null');
+    await execAsync('echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null');
 
     // Set up NAT
-    await execAsync('iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
-    await execAsync(`iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
-    await execAsync(`iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
+    await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
+    await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
+    await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
 
     console.log('LAN passthrough enabled');
     return {
@@ -493,9 +493,9 @@ export async function enableLANPassthrough() {
  */
 export async function disableLANPassthrough() {
   try {
-    await execAsync(`iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true`);
-    await execAsync(`iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true`);
-    await execAsync(`iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT 2>/dev/null || true`);
+    await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true`);
+    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true`);
+    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT 2>/dev/null || true`);
 
     return {
       success: true,
@@ -518,7 +518,7 @@ export async function setHostname(domain) {
     const hostname = domain.replace(/\.local$/, '');
 
     // Update system hostname
-    await execAsync(`hostnamectl set-hostname ${hostname}`);
+    await execAsync(`sudo hostnamectl set-hostname ${hostname}`);
 
     // Update /etc/hosts
     try {
@@ -532,15 +532,15 @@ export async function setHostname(domain) {
       });
 
       fs.writeFileSync('/tmp/hosts.tmp', updatedLines.join('\n'));
-      await execAsync('cp /tmp/hosts.tmp /etc/hosts');
-      await execAsync('rm /tmp/hosts.tmp');
+      await execAsync('sudo cp /tmp/hosts.tmp /etc/hosts');
+      await execAsync('sudo rm /tmp/hosts.tmp');
     } catch (err) {
       console.warn('Failed to update /etc/hosts:', err.message);
     }
 
     // Restart Avahi for mDNS
     try {
-      await execAsync('systemctl restart avahi-daemon');
+      await execAsync('sudo systemctl restart avahi-daemon');
       console.log(`mDNS hostname set to: ${hostname}.local`);
     } catch (err) {
       console.warn('Avahi not available, mDNS may not work');
@@ -570,13 +570,13 @@ export async function enableWiFiMode() {
     await stopHotspot();
 
     // Bring interface up
-    await execAsync(`ip link set ${INTERFACE} up`);
+    await execAsync(`sudo ip link set ${INTERFACE} up`);
 
     // Check if WiFi is blocked
     try {
       const { stdout: rfkillStatus } = await execAsync('rfkill list wifi 2>/dev/null || true');
       if (rfkillStatus.includes('Soft blocked: yes') || rfkillStatus.includes('Hard blocked: yes')) {
-        await execAsync('rfkill unblock wifi');
+        await execAsync('sudo rfkill unblock wifi');
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     } catch {
@@ -584,11 +584,11 @@ export async function enableWiFiMode() {
     }
 
     // Enable NetworkManager management
-    await execAsync(`nmcli device set ${INTERFACE} managed yes`);
+    await execAsync(`sudo nmcli device set ${INTERFACE} managed yes`);
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Trigger auto-connect
-    await execAsync(`nmcli device reapply ${INTERFACE} 2>/dev/null || true`);
+    await execAsync(`sudo nmcli device reapply ${INTERFACE} 2>/dev/null || true`);
 
     console.log('WiFi mode enabled - NetworkManager is now handling connections');
     return {

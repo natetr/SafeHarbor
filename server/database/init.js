@@ -786,6 +786,13 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add updated_at column to network_config if it doesn't exist (for legacy databases)
+  try {
+    db.exec(`ALTER TABLE network_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP`);
+  } catch (err) {
+    // Column already exists
+  }
+
   // Add status and error_message columns for crash detection and quarantine
   try {
     db.exec(`ALTER TABLE zim_libraries ADD COLUMN status TEXT DEFAULT 'active'`);
