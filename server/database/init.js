@@ -787,8 +787,10 @@ export function initDatabase() {
   }
 
   // Add updated_at column to network_config if it doesn't exist (for legacy databases)
+  // Note: SQLite doesn't allow CURRENT_TIMESTAMP in ALTER TABLE, so we add NULL and update
   try {
-    db.exec(`ALTER TABLE network_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP`);
+    db.exec(`ALTER TABLE network_config ADD COLUMN updated_at DATETIME`);
+    db.exec(`UPDATE network_config SET updated_at = datetime('now') WHERE updated_at IS NULL`);
   } catch (err) {
     // Column already exists
   }

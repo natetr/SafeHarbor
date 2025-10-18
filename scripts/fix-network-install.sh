@@ -44,9 +44,11 @@ echo "✓ Database backed up"
 echo ""
 
 echo "Step 3: Adding missing database column..."
+# SQLite doesn't allow CURRENT_TIMESTAMP in ALTER TABLE, so we use a fixed default
 sqlite3 "$DB_PATH" <<EOF
--- Add updated_at column if it doesn't exist
-ALTER TABLE network_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP;
+-- Add updated_at column if it doesn't exist (with NULL default, then update)
+ALTER TABLE network_config ADD COLUMN updated_at DATETIME;
+UPDATE network_config SET updated_at = datetime('now') WHERE updated_at IS NULL;
 EOF
 
 if [ $? -eq 0 ]; then
