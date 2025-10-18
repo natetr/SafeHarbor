@@ -181,13 +181,48 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 
-// Rate limiting
-const limiter = rateLimit({
+// Rate limiting - separate limits for different endpoint types
+const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === 'development' ? 1000 : 100 // Higher limit for development
+  max: process.env.NODE_ENV === 'development' ? 1000 : 500, // Increased from 100 to 500 for production
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
-app.use('/api/', limiter);
+// Stricter rate limit for authentication endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // Only 20 auth attempts per 15 minutes
+  message: 'Too many authentication attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// No rate limiting for health/status polling endpoints
+const pollingEndpoints = [
+  '/api/health',
+  '/api/network/status',
+  '/api/network/config',
+  '/api/network/platform',
+  '/api/system/stats',
+  '/api/zim/download/progress',
+  '/api/storage/usage',
+  '/api/auth/verify',
+  '/api/zim/settings/auto-index',
+  '/api/zim/index/statuses'
+];
+
+// Apply stricter rate limit to auth endpoints
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+
+// Apply general rate limit to all API routes except polling endpoints
+app.use('/api/', (req, res, next) => {
+  if (pollingEndpoints.some(endpoint => req.path.startsWith(endpoint))) {
+    return next(); // Skip rate limiting for polling endpoints
+  }
+  generalLimiter(req, res, next);
+});
 
 // Request logging middleware for debugging
 app.use((req, res, next) => {
