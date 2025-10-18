@@ -16,15 +16,22 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-INSTALL_DIR="/opt/safeharbor"
-DB_PATH="$INSTALL_DIR/safeharbor.db"
-
-# Check if we're in the right directory
-if [ ! -f "$DB_PATH" ]; then
-  echo "❌ Database not found at $DB_PATH"
-  echo "   Are you running this from /opt/safeharbor?"
+# Detect SafeHarbor installation directory
+if [ -f "/home/nate/safeharbor/safeharbor.db" ]; then
+  INSTALL_DIR="/home/nate/safeharbor"
+elif [ -f "/opt/safeharbor/safeharbor.db" ]; then
+  INSTALL_DIR="/opt/safeharbor"
+elif [ -f "$(pwd)/safeharbor.db" ]; then
+  INSTALL_DIR="$(pwd)"
+else
+  echo "❌ Could not find SafeHarbor installation"
+  echo "   Please run this script from the SafeHarbor directory"
   exit 1
 fi
+
+DB_PATH="$INSTALL_DIR/safeharbor.db"
+echo "Found SafeHarbor at: $INSTALL_DIR"
+echo ""
 
 echo "Step 1: Stopping SafeHarbor service..."
 systemctl stop safeharbor
