@@ -17,8 +17,8 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # Detect SafeHarbor installation directory
-if [ -f "/home/nate/safeharbor/safeharbor.db" ]; then
-  INSTALL_DIR="/home/nate/safeharbor"
+if [ -f "$HOME/safeharbor/safeharbor.db" ]; then
+  INSTALL_DIR="$HOME/safeharbor"
 elif [ -f "/opt/safeharbor/safeharbor.db" ]; then
   INSTALL_DIR="/opt/safeharbor"
 elif [ -f "$(pwd)/safeharbor.db" ]; then
