@@ -33,7 +33,13 @@ export default function NetworkStatusIndicator() {
 
   const getStatusColor = () => {
     if (status.mode === 'hotspot') {
-      return status.hotspot?.active ? '#28a745' : '#6c757d'; // Green if active, gray if not
+      if (!status.hotspot?.active) return '#6c757d'; // Gray if inactive
+      // Use gradient or teal-green if both hotspot and LAN are active
+      const hasLAN = status.ethernet?.connected;
+      if (hasLAN) {
+        return 'linear-gradient(135deg, #28a745 0%, #17a2b8 100%)'; // Green to teal gradient
+      }
+      return '#28a745'; // Green for hotspot only
     }
     if (status.mode === 'wifi') {
       if (status.wifi?.connected) return '#007bff'; // Blue for WiFi connected
@@ -49,6 +55,12 @@ export default function NetworkStatusIndicator() {
       const config = status.config || {};
       const visibility = config.broadcast_ssid === 0 ? 'Hidden' : 'Visible';
       const ssid = config.hotspot_ssid || 'SafeHarbor';
+      const hasLAN = status.ethernet?.connected;
+
+      // Combined badge when both hotspot and LAN are active
+      if (hasLAN) {
+        return `Hotspot + LAN: ${ssid} (${visibility})`;
+      }
 
       return `Hotspot: ${ssid} (${visibility})`;
     }
@@ -88,10 +100,6 @@ export default function NetworkStatusIndicator() {
     return 'Network status unknown';
   };
 
-  // Additional status indicators
-  const hasLAN = status.ethernet?.connected;
-  const showLAN = hasLAN && status.mode === 'hotspot'; // Only show LAN in hotspot mode for brevity
-
   return (
     <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
       <div
@@ -115,26 +123,6 @@ export default function NetworkStatusIndicator() {
       >
         <span>{getStatusText()}</span>
       </div>
-
-      {/* Optional: Show LAN indicator separately when in hotspot mode */}
-      {showLAN && (
-        <div
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            padding: '0.375rem 0.75rem',
-            background: '#17a2b8', // Teal for LAN
-            color: 'white',
-            borderRadius: '4px',
-            fontSize: '0.875rem',
-            fontWeight: '500',
-            whiteSpace: 'nowrap'
-          }}
-          title={`LAN Connected: ${status.ethernet.ip}`}
-        >
-          <span>LAN: Connected</span>
-        </div>
-      )}
     </div>
   );
 }

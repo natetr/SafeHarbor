@@ -44,6 +44,36 @@ let updateCheckStatus = {
   error: null
 };
 
+/**
+ * Check if internet is available for catalog/downloads
+ * Returns true if in WiFi mode OR in hotspot mode with LAN connected
+ */
+async function checkInternetAvailability() {
+  try {
+    const networkConfig = await safeDbGet('SELECT mode FROM network_config ORDER BY id DESC LIMIT 1', []);
+
+    // WiFi mode always has internet (if connected)
+    if (!networkConfig || networkConfig.mode === 'wifi') {
+      return true;
+    }
+
+    // Hotspot mode: check if ethernet is connected for LAN passthrough
+    if (networkConfig.mode === 'hotspot') {
+      const { getEthernetStatus } = await import('../services/networkManager.js');
+      const ethStatus = await getEthernetStatus();
+
+      // Internet available if ethernet is connected
+      return ethStatus.connected;
+    }
+
+    return false;
+  } catch (err) {
+    console.error('Error checking internet availability:', err);
+    // If we can't determine, assume no internet (safer default)
+    return false;
+  }
+}
+
 // Helper function to extract ZIM name and version from filename
 function parseZimFilename(filename) {
   // Example: wikipedia_en_all_maxi_2024-01.zim -> { name: 'wikipedia_en_all_maxi', version: '2024-01' }
@@ -1074,6 +1104,15 @@ function parseCatalogXml(xml) {
 // Get available languages
 router.get('/catalog/languages', authenticateToken, requireAdmin, async (req, res) => {
   try {
+    // Check if we have internet connectivity (WiFi mode OR hotspot+LAN mode)
+    const hasInternet = await checkInternetAvailability();
+    if (!hasInternet) {
+      return res.status(400).json({
+        error: 'No internet connection available',
+        details: 'Connect to WiFi or enable LAN passthrough in Hotspot mode to access the catalog.'
+      });
+    }
+
     const response = await axios.get('https://library.kiwix.org/catalog/v2/languages', {
       timeout: 15000
     });
@@ -1106,6 +1145,15 @@ router.get('/catalog/languages', authenticateToken, requireAdmin, async (req, re
 // Get Kiwix catalog
 router.get('/catalog', authenticateToken, requireAdmin, async (req, res) => {
   try {
+    // Check if we have internet connectivity (WiFi mode OR hotspot+LAN mode)
+    const hasInternet = await checkInternetAvailability();
+    if (!hasInternet) {
+      return res.status(400).json({
+        error: 'No internet connection available',
+        details: 'Connect to WiFi or enable LAN passthrough in Hotspot mode to access the catalog.'
+      });
+    }
+
     const { count = 50, start = 0, category, lang, q } = req.query;
     let url = `https://library.kiwix.org/catalog/v2/entries?count=${count}&start=${start}`;
 
@@ -1193,19 +1241,14 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
   let operationId;
 
   try {
-    // Check network mode - downloads require home network mode with internet access
-    try {
-      const networkConfig = await safeDbGet('SELECT mode FROM network_config ORDER BY id DESC LIMIT 1', []);
-      if (networkConfig && networkConfig.mode === 'hotspot') {
-        zimLogger.download.warn('Download blocked: device is in hotspot mode');
-        return res.status(400).json({
-          error: 'Cannot download ZIMs in Hotspot Mode',
-          details: 'Switch to Home Network Mode to download ZIM files. Hotspot mode does not provide internet connectivity for downloads.'
-        });
-      }
-    } catch (netErr) {
-      // If we can't check network mode, log warning but allow (for development/testing)
-      zimLogger.download.warn('Could not check network mode, proceeding with download', { error: netErr.message });
+    // Check if internet is available (WiFi mode OR hotspot mode with LAN)
+    const hasInternet = await checkInternetAvailability();
+    if (!hasInternet) {
+      zimLogger.download.warn('Download blocked: no internet connection available');
+      return res.status(400).json({
+        error: 'No internet connection available',
+        details: 'Connect to WiFi or enable LAN passthrough in Hotspot mode to download ZIM files.'
+      });
     }
 
     const { url, title, description, language, size, articleCount, mediaCount, updated } = req.body;
@@ -2086,6 +2129,15 @@ router.get('/:id/content/*', async (req, res) => {
 // Check for updates for a specific ZIM
 router.get('/:id/check-update', authenticateToken, requireAdmin, async (req, res) => {
   try {
+    // Check if internet is available
+    const hasInternet = await checkInternetAvailability();
+    if (!hasInternet) {
+      return res.status(400).json({
+        error: 'No internet connection available',
+        details: 'Connect to WiFi or enable LAN passthrough in Hotspot mode to check for updates.'
+      });
+    }
+
     const library = db.prepare('SELECT * FROM zim_libraries WHERE id = ?').get(req.params.id);
 
     if (!library) {
@@ -2413,6 +2465,15 @@ async function runUpdateCheckBackground() {
 
 // Start update check (returns immediately, runs in background)
 router.post('/check-updates/start', authenticateToken, requireAdmin, async (req, res) => {
+  // Check if internet is available
+  const hasInternet = await checkInternetAvailability();
+  if (!hasInternet) {
+    return res.status(400).json({
+      error: 'No internet connection available',
+      details: 'Connect to WiFi or enable LAN passthrough in Hotspot mode to check for updates.'
+    });
+  }
+
   if (updateCheckStatus.isRunning) {
     return res.status(429).json({
       error: 'Update check already in progress',

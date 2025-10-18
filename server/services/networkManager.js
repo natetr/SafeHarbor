@@ -455,6 +455,8 @@ export async function stopHotspot() {
  */
 export async function enableLANPassthrough() {
   try {
+    console.log('Starting LAN passthrough setup...');
+
     // Check if ethernet is available
     const ethStatus = await getEthernetStatus();
     if (!ethStatus.connected) {
@@ -465,18 +467,63 @@ export async function enableLANPassthrough() {
       };
     }
 
-    // Enable IP forwarding
+    console.log(`LAN passthrough: Ethernet connected at ${ethStatus.ip}`);
+
+    // First, clean up any existing rules to prevent duplicates
+    await disableLANPassthrough();
+
+    // Wait a moment for cleanup to complete
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Enable IP forwarding (sysctl for permanent, proc for immediate)
+    console.log('Enabling IP forwarding...');
     await execAsync('echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null');
 
-    // Set up NAT
-    await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
-    await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
-    await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
+    // Verify IP forwarding is enabled
+    const ipForwardStatus = await execAsync('cat /proc/sys/net/ipv4/ip_forward');
+    if (ipForwardStatus.stdout.trim() !== '1') {
+      throw new Error('IP forwarding not enabled');
+    }
+    console.log('IP forwarding enabled');
 
-    console.log('LAN passthrough enabled');
+    // Set up NAT with verification
+    console.log('Setting up iptables NAT rules...');
+
+    // Rule 1: MASQUERADE for outbound traffic on eth0
+    await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
+    console.log('✓ NAT POSTROUTING rule added');
+
+    // Rule 2: Allow established/related connections from eth0 to wlan0
+    await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
+    console.log(`✓ FORWARD rule added (eth0 → ${INTERFACE})`);
+
+    // Rule 3: Allow all traffic from wlan0 to eth0
+    await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
+    console.log(`✓ FORWARD rule added (${INTERFACE} → eth0)`);
+
+    // Verify the rules were added
+    const natRules = await execAsync('sudo iptables -t nat -L POSTROUTING -n -v');
+    const forwardRules = await execAsync('sudo iptables -L FORWARD -n -v');
+
+    if (!natRules.stdout.includes('MASQUERADE') || !natRules.stdout.includes('eth0')) {
+      console.warn('Warning: NAT MASQUERADE rule may not be active');
+    }
+
+    if (!forwardRules.stdout.includes(INTERFACE) || !forwardRules.stdout.includes('eth0')) {
+      console.warn('Warning: FORWARD rules may not be active');
+    }
+
+    console.log('LAN passthrough enabled successfully');
+    console.log('NAT rules:', natRules.stdout.split('\n').slice(0, 5).join('\n'));
+    console.log('FORWARD rules:', forwardRules.stdout.split('\n').slice(0, 5).join('\n'));
+
     return {
       success: true,
-      message: 'LAN passthrough enabled'
+      message: 'LAN passthrough enabled',
+      details: {
+        eth_ip: ethStatus.ip,
+        wlan_ip: '192.168.4.1'
+      }
     };
   } catch (err) {
     console.error('Error enabling LAN passthrough:', err);
@@ -493,15 +540,29 @@ export async function enableLANPassthrough() {
  */
 export async function disableLANPassthrough() {
   try {
-    await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true`);
-    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true`);
-    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT 2>/dev/null || true`);
+    console.log('Disabling LAN passthrough...');
 
+    // Remove rules - loop multiple times in case of duplicates
+    // Using while loop approach to remove all matching rules
+    for (let i = 0; i < 5; i++) {
+      await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true`);
+    }
+
+    for (let i = 0; i < 5; i++) {
+      await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true`);
+    }
+
+    for (let i = 0; i < 5; i++) {
+      await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT 2>/dev/null || true`);
+    }
+
+    console.log('LAN passthrough disabled');
     return {
       success: true,
       message: 'LAN passthrough disabled'
     };
   } catch (err) {
+    console.error('Error disabling LAN passthrough:', err);
     return {
       success: false,
       message: 'Failed to disable LAN passthrough',
