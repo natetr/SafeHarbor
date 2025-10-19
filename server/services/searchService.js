@@ -1,7 +1,9 @@
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
 import path from 'path';
-import { searchIndexedArticles, searchZIMDirectly } from './zimIndexingService.js';
+import zimIndexingService from './zimIndexingService.js';
+
+const { searchIndexedArticles, searchZIMDirectly } = zimIndexingService;
 
 const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 

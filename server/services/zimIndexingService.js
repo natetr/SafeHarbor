@@ -223,10 +223,7 @@ async function searchZIMDirectly(zimPath, query, zim, options = {}) {
     // Perform search with Query object
     const search = searcher.search(new Query(query));
 
-    // Get estimated match count
-    const estimatedMatches = search.getEstimatedMatches();
-
-    console.log(`🔍 libzim search: "${query}" in ${zim.title} - ~${estimatedMatches} matches`);
+    console.log(`🔍 libzim search: "${query}" in ${zim.title}`);
 
     // Get results (start at 0, retrieve up to limit)
     const results = search.getResults(0, limit);
@@ -240,18 +237,18 @@ async function searchZIMDirectly(zimPath, query, zim, options = {}) {
         zimCategory: zim.category || 'Other',
         title: entry.title,
         path: entry.path,
-        snippet: entry.snippet || '', // Xapian provides snippets!
+        snippet: entry.snippet || '', // Xapian may provide snippets
         url: `http://${hostname}:${KIWIX_PORT}/${zim.filename.replace('.zim', '')}/${entry.path}`,
-        type: 'zim-article-libzim', // New type to distinguish from kiwix HTTP search
-        estimatedMatches // Include total for UI display
+        type: 'zim-article-libzim' // New type to distinguish from kiwix HTTP search
       });
     }
+
+    console.log(`✓ libzim search: found ${formattedResults.length} results`);
 
     zimLogger.search.detail(`libzim search completed`, {
       zimTitle: zim.title,
       query,
-      resultsCount: formattedResults.length,
-      estimatedMatches
+      resultsCount: formattedResults.length
     });
 
     return formattedResults;
