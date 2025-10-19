@@ -221,13 +221,32 @@ async function discoverArticlesViaLibzim(zimPath, maxArticles) {
     console.log(`  - All entries: ${allEntries.toLocaleString()}`);
     console.log(`  - Article count (from metadata): ${reportedArticles.toLocaleString()}`);
 
+    // Calculate sampling rate BEFORE iteration to prevent OOM
+    let samplingRate = 1;
+    if (maxArticles === 0 && reportedArticles > 0) {
+      if (reportedArticles >= 1000000) {
+        samplingRate = 500;
+        console.log(`📊 Large ZIM detected (${reportedArticles.toLocaleString()} articles)`);
+        console.log(`   Applying smart sampling during discovery: 1 in ${samplingRate} articles`);
+      } else if (reportedArticles >= 100000) {
+        samplingRate = 50;
+        console.log(`📊 Medium-large ZIM detected (${reportedArticles.toLocaleString()} articles)`);
+        console.log(`   Applying smart sampling during discovery: 1 in ${samplingRate} articles`);
+      } else if (reportedArticles >= 10000) {
+        samplingRate = 5;
+        console.log(`📊 Medium ZIM detected (${reportedArticles.toLocaleString()} articles)`);
+        console.log(`   Applying smart sampling during discovery: 1 in ${samplingRate} articles`);
+      }
+    }
+
     const articles = [];
     let articleCount = 0;
+    let actualArticleCount = 0; // Count before sampling
     let redirectCount = 0;
     let otherCount = 0;
     let totalProcessed = 0;
 
-    // Iterate through all entries and collect articles
+    // Iterate through all entries and collect articles WITH SAMPLING
     for (const entry of archive.iterByPath()) {
       totalProcessed++;
 
@@ -252,13 +271,21 @@ async function discoverArticlesViaLibzim(zimPath, maxArticles) {
         continue; // Skip asset files
       }
 
-      // Store the article path
+      // This is an article - increment actual count
+      actualArticleCount++;
+
+      // Apply sampling: only keep every Nth article
+      if ((actualArticleCount - 1) % samplingRate !== 0) {
+        continue; // Skip this article due to sampling
+      }
+
+      // Store the sampled article path
       articles.push(entry.path);
       articleCount++;
 
-      // Log progress every 1000 articles
+      // Log progress every 1000 SAMPLED articles
       if (articleCount % 1000 === 0) {
-        zimLogger.indexing.verbose(`Progress: ${articleCount.toLocaleString()} articles, ${redirectCount.toLocaleString()} redirects discovered...`);
+        zimLogger.indexing.verbose(`Progress: ${articleCount.toLocaleString()} sampled articles, ${actualArticleCount.toLocaleString()} total discovered...`);
       }
 
       // Respect maxArticles limit
@@ -269,19 +296,27 @@ async function discoverArticlesViaLibzim(zimPath, maxArticles) {
     }
 
     // Calculate other entries (non-articles, non-redirects like images, CSS, etc.)
-    otherCount = totalProcessed - articleCount - redirectCount;
+    otherCount = totalProcessed - actualArticleCount - redirectCount;
 
     console.log(`✓ Discovery complete:`);
-    console.log(`  - Articles (actual content): ${articleCount.toLocaleString()}`);
+    console.log(`  - Articles (actual content): ${actualArticleCount.toLocaleString()}`);
+    console.log(`  - Sampled articles: ${articleCount.toLocaleString()}`);
     console.log(`  - Redirects (excluded): ${redirectCount.toLocaleString()}`);
     console.log(`  - Other entries: ${otherCount.toLocaleString()}`);
     console.log(`  - Total processed: ${totalProcessed.toLocaleString()}`);
+    if (samplingRate > 1) {
+      console.log(`  - Sampling rate: 1 in ${samplingRate} (${(100 / samplingRate).toFixed(1)}%)`);
+      console.log(`  - Memory saved: ~${((actualArticleCount - articleCount) * 0.0001).toFixed(1)}MB`);
+    }
 
     return {
       articles,
+      samplingRate,
+      originalArticleCount: actualArticleCount,
       stats: {
         totalEntries,
-        articleCount,
+        articleCount: actualArticleCount, // Return the actual count before sampling
+        sampledCount: articleCount, // New: count after sampling
         redirectCount,
         otherCount,
         totalProcessed
@@ -352,8 +387,8 @@ async function indexZIMArticles(zim, options) {
     console.log(`Discovering articles for ${zim.title}...`);
 
     let articlesToIndex = [];
-
     let discoveryStats = null;
+    let discoveryResult = null; // Store discovery result for sampling metadata
 
     // Try direct ZIM file access first (preferred method)
     try {
@@ -363,15 +398,16 @@ async function indexZIMArticles(zim, options) {
         ? zim.filepath
         : path.join(process.cwd(), zim.filepath);
 
-      const discoveryResult = await discoverArticlesViaLibzim(zimPath, maxArticles);
+      discoveryResult = await discoverArticlesViaLibzim(zimPath, maxArticles);
       discoveryStats = discoveryResult.stats;
+      const samplingRate = discoveryResult.samplingRate || 1;
 
       // Store just the article path without /content/zimname/ prefix
       // libzim returns paths like "100%_renewable_energy"
       // We'll construct the full URL when serving results
       articlesToIndex = discoveryResult.articles;
 
-      console.log(`✓ Using direct ZIM access: discovered ${articlesToIndex.length} articles`);
+      console.log(`✓ Using direct ZIM access: discovered ${articlesToIndex.length} articles${samplingRate > 1 ? ' (sampled)' : ''}`);
     } catch (libzimError) {
       // Fallback to search-based discovery
       console.warn(`Direct ZIM access failed: ${libzimError.message}`);
@@ -427,57 +463,22 @@ async function indexZIMArticles(zim, options) {
       `, [articlesToIndex.length, zim.id]);
     }
 
-    // Step 3.5: Apply smart sampling for large ZIMs
-    let samplingRate = 1; // 1 = no sampling (100%)
-    let isSampled = false;
-    const originalCount = articlesToIndex.length;
+    // Update database with sampling metadata if applicable
+    if (discoveryStats && discoveryStats.sampledCount !== discoveryStats.articleCount) {
+      const samplingRate = discoveryResult.samplingRate || 1;
+      const originalCount = discoveryResult.originalArticleCount || discoveryStats.articleCount;
 
-    if (maxArticles === 0) { // Only apply smart sampling if no manual limit set
-      if (articlesToIndex.length >= 1000000) {
-        // 1M+ articles: sample every 500th article (0.2%)
-        samplingRate = 500;
-        isSampled = true;
-        console.log(`📊 Large ZIM detected (${articlesToIndex.length.toLocaleString()} articles)`);
-        console.log(`   Applying smart sampling: 1 in ${samplingRate} articles`);
-      } else if (articlesToIndex.length >= 100000) {
-        // 100K-1M articles: sample every 50th article (2%)
-        samplingRate = 50;
-        isSampled = true;
-        console.log(`📊 Medium-large ZIM detected (${articlesToIndex.length.toLocaleString()} articles)`);
-        console.log(`   Applying smart sampling: 1 in ${samplingRate} articles`);
-      } else if (articlesToIndex.length >= 10000) {
-        // 10K-100K articles: sample every 5th article (20%)
-        samplingRate = 5;
-        isSampled = true;
-        console.log(`📊 Medium ZIM detected (${articlesToIndex.length.toLocaleString()} articles)`);
-        console.log(`   Applying smart sampling: 1 in ${samplingRate} articles`);
-      }
-
-      if (isSampled) {
-        // Sample articles evenly across the list
-        const sampledArticles = [];
-        for (let i = 0; i < articlesToIndex.length; i += samplingRate) {
-          sampledArticles.push(articlesToIndex[i]);
-        }
-        articlesToIndex = sampledArticles;
-        jobInfo.total = articlesToIndex.length;
-
-        // Update status to indicate sampling
-        await safeDbRun(`
-          UPDATE zim_indexing_status
-          SET total_articles = ?,
-              is_sampled = 1,
-              sampling_rate = ?,
-              original_article_count = ?
-          WHERE zim_id = ?
-        `, [articlesToIndex.length, samplingRate, originalCount, zim.id]);
-
-        console.log(`   ✓ Sampling complete: ${articlesToIndex.length.toLocaleString()} articles selected`);
-        console.log(`   Storage reduction: ${((1 - articlesToIndex.length / originalCount) * 100).toFixed(1)}%`);
-      }
+      await safeDbRun(`
+        UPDATE zim_indexing_status
+        SET total_articles = ?,
+            is_sampled = 1,
+            sampling_rate = ?,
+            original_article_count = ?
+        WHERE zim_id = ?
+      `, [articlesToIndex.length, samplingRate, originalCount, zim.id]);
     }
 
-    console.log(`Indexing ${articlesToIndex.length.toLocaleString()} articles from ${zim.title}${isSampled ? ' (sampled)' : ''}...`);
+    console.log(`Indexing ${articlesToIndex.length.toLocaleString()} articles from ${zim.title}...`);
 
     // Step 4: Fetch and index articles in batches with parallel processing
     for (let i = 0; i < articlesToIndex.length; i += batchSize) {
