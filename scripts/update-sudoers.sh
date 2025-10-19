@@ -47,6 +47,8 @@ safeharbor ALL=(ALL) NOPASSWD: /sbin/rfkill
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/rfkill
 safeharbor ALL=(ALL) NOPASSWD: /sbin/iw
 safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/iw
+safeharbor ALL=(ALL) NOPASSWD: /sbin/sysctl
+safeharbor ALL=(ALL) NOPASSWD: /usr/sbin/sysctl
 EOF
 
 chmod 440 /etc/sudoers.d/safeharbor
