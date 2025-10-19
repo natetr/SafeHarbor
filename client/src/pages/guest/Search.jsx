@@ -88,7 +88,11 @@ export default function GuestSearch() {
 
       // Separate content from ZIM results for display
       const content = combinedResults.filter(r => r.type === 'content');
-      const zim = combinedResults.filter(r => r.type === 'zim-article' || r.type === 'zim-article-indexed');
+      const zim = combinedResults.filter(r =>
+        r.type === 'zim-article' ||
+        r.type === 'zim-article-indexed' ||
+        r.type === 'zim-article-libzim'
+      );
 
       setContentResults(content);
       setZimResults(zim);
