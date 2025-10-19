@@ -364,16 +364,50 @@ max_num_sta=${config.connection_limit || 10}
 
     // Create dnsmasq configuration
     const domain = config.hotspot_domain || 'safeharbor.local';
+
+    // Get upstream DNS servers from eth0 if available (for LAN passthrough)
+    let upstreamDNS = '';
+    if (config.lan_passthrough) {
+      try {
+        const ethStatus = await getEthernetStatus();
+        if (ethStatus.connected) {
+          // Get DNS servers from resolv.conf
+          const { stdout: resolvConf } = await execAsync('cat /etc/resolv.conf 2>/dev/null || true');
+          const dnsServers = resolvConf.match(/nameserver\s+(\d+\.\d+\.\d+\.\d+)/g);
+          if (dnsServers && dnsServers.length > 0) {
+            // Use the system's DNS servers as upstream
+            upstreamDNS = dnsServers.map(line => {
+              const match = line.match(/nameserver\s+(\d+\.\d+\.\d+\.\d+)/);
+              return match ? `server=${match[1]}` : '';
+            }).filter(Boolean).join('\n');
+            console.log('Using upstream DNS servers for LAN passthrough');
+          }
+        }
+      } catch (err) {
+        console.warn('Could not get upstream DNS servers:', err.message);
+      }
+    }
+
+    // Fallback to common public DNS if no upstream found
+    if (!upstreamDNS && config.lan_passthrough) {
+      upstreamDNS = 'server=8.8.8.8\nserver=8.8.4.4';
+    }
+
     const dnsmasqConf = `
 interface=${INTERFACE}
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 domain=wlan
 dhcp-leasefile=/tmp/dnsmasq.leases
 pid-file=/tmp/dnsmasq.pid
+${config.lan_passthrough ? upstreamDNS : ''}
+${config.lan_passthrough ? 'dhcp-option=option:router,192.168.4.1' : ''}
+${config.lan_passthrough ? 'dhcp-option=option:dns-server,192.168.4.1' : ''}
 address=/${domain}/192.168.4.1
-address=/captive.apple.com/192.168.4.1
-address=/connectivitycheck.gstatic.com/192.168.4.1
-address=/www.msftconnecttest.com/192.168.4.1
+${config.lan_passthrough ? '# Captive portal detection bypassed for LAN passthrough' : 'address=/captive.apple.com/192.168.4.1'}
+${config.lan_passthrough ? '' : 'address=/connectivitycheck.gstatic.com/192.168.4.1'}
+${config.lan_passthrough ? '' : 'address=/www.msftconnecttest.com/192.168.4.1'}
+${config.lan_passthrough ? '' : 'address=/detectportal.firefox.com/192.168.4.1'}
+${config.lan_passthrough ? '' : 'no-resolv'}
 `;
 
     fs.writeFileSync('/tmp/dnsmasq.conf', dnsmasqConf);
@@ -475,31 +509,59 @@ export async function enableLANPassthrough() {
     // Wait a moment for cleanup to complete
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    // Enable IP forwarding (sysctl for permanent, proc for immediate)
+    // Enable IP forwarding (both immediate and persistent)
     console.log('Enabling IP forwarding...');
-    await execAsync('echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null');
+
+    // Immediate enable via sysctl
+    await execAsync('sudo sysctl -w net.ipv4.ip_forward=1');
+    await execAsync('sudo sysctl -w net.ipv4.conf.all.forwarding=1');
+
+    // Make persistent via sysctl.d
+    try {
+      const sysctlContent = '# SafeHarbor LAN Passthrough\nnet.ipv4.ip_forward=1\nnet.ipv4.conf.all.forwarding=1\n';
+      fs.writeFileSync('/tmp/99-safeharbor-forwarding.conf', sysctlContent);
+      await execAsync('sudo cp /tmp/99-safeharbor-forwarding.conf /etc/sysctl.d/99-safeharbor-forwarding.conf');
+      await execAsync('sudo rm /tmp/99-safeharbor-forwarding.conf');
+      await execAsync('sudo sysctl -p /etc/sysctl.d/99-safeharbor-forwarding.conf 2>/dev/null || true');
+      console.log('✓ IP forwarding made persistent');
+    } catch (err) {
+      console.warn('Warning: Could not make IP forwarding persistent:', err.message);
+    }
 
     // Verify IP forwarding is enabled
     const ipForwardStatus = await execAsync('cat /proc/sys/net/ipv4/ip_forward');
     if (ipForwardStatus.stdout.trim() !== '1') {
       throw new Error('IP forwarding not enabled');
     }
-    console.log('IP forwarding enabled');
+    console.log('✓ IP forwarding enabled');
 
     // Set up NAT with verification
     console.log('Setting up iptables NAT rules...');
 
     // Rule 1: MASQUERADE for outbound traffic on eth0
     await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
-    console.log('✓ NAT POSTROUTING rule added');
+    console.log('✓ NAT POSTROUTING rule added (MASQUERADE on eth0)');
 
     // Rule 2: Allow established/related connections from eth0 to wlan0
     await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
-    console.log(`✓ FORWARD rule added (eth0 → ${INTERFACE})`);
+    console.log(`✓ FORWARD rule added (eth0 → ${INTERFACE} ESTABLISHED/RELATED)`);
 
     // Rule 3: Allow all traffic from wlan0 to eth0
     await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
-    console.log(`✓ FORWARD rule added (${INTERFACE} → eth0)`);
+    console.log(`✓ FORWARD rule added (${INTERFACE} → eth0 ALL)`);
+
+    // Rule 4: Allow DNS queries to be forwarded
+    await execAsync('sudo iptables -A INPUT -i wlan0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true');
+    await execAsync('sudo iptables -A INPUT -i wlan0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true');
+    console.log('✓ DNS forwarding rules added');
+
+    // Save iptables rules for persistence
+    try {
+      await execAsync('sudo iptables-save | sudo tee /etc/iptables/rules.v4 > /dev/null 2>&1 || sudo netfilter-persistent save 2>/dev/null || true');
+      console.log('✓ iptables rules saved for persistence');
+    } catch (err) {
+      console.warn('Warning: Could not save iptables rules for persistence');
+    }
 
     // Verify the rules were added
     const natRules = await execAsync('sudo iptables -t nat -L POSTROUTING -n -v');
@@ -522,7 +584,8 @@ export async function enableLANPassthrough() {
       message: 'LAN passthrough enabled',
       details: {
         eth_ip: ethStatus.ip,
-        wlan_ip: '192.168.4.1'
+        wlan_ip: '192.168.4.1',
+        persistent: true
       }
     };
   } catch (err) {
@@ -542,8 +605,7 @@ export async function disableLANPassthrough() {
   try {
     console.log('Disabling LAN passthrough...');
 
-    // Remove rules - loop multiple times in case of duplicates
-    // Using while loop approach to remove all matching rules
+    // Remove iptables rules - loop multiple times in case of duplicates
     for (let i = 0; i < 5; i++) {
       await execAsync(`sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true`);
     }
@@ -554,6 +616,26 @@ export async function disableLANPassthrough() {
 
     for (let i = 0; i < 5; i++) {
       await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT 2>/dev/null || true`);
+    }
+
+    // Remove DNS forwarding rules
+    for (let i = 0; i < 3; i++) {
+      await execAsync('sudo iptables -D INPUT -i wlan0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true');
+      await execAsync('sudo iptables -D INPUT -i wlan0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true');
+    }
+
+    // Disable IP forwarding
+    await execAsync('sudo sysctl -w net.ipv4.ip_forward=0');
+    await execAsync('sudo sysctl -w net.ipv4.conf.all.forwarding=0');
+
+    // Remove persistent configuration
+    await execAsync('sudo rm -f /etc/sysctl.d/99-safeharbor-forwarding.conf 2>/dev/null || true');
+
+    // Save iptables state
+    try {
+      await execAsync('sudo iptables-save | sudo tee /etc/iptables/rules.v4 > /dev/null 2>&1 || sudo netfilter-persistent save 2>/dev/null || true');
+    } catch (err) {
+      // Ignore save errors
     }
 
     console.log('LAN passthrough disabled');
