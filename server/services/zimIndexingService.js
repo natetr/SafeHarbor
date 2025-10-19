@@ -1,6 +1,6 @@
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
-import { Archive } from '@openzim/libzim';
+import { Archive, Searcher, Query } from '@openzim/libzim';
 import path from 'path';
 import { zimLogger } from '../utils/zimLogger.js';
 
@@ -201,6 +201,72 @@ export async function startZIMIndexing(zimId, options = {}) {
 }
 
 /**
+ * Search directly in ZIM file using libzim's built-in Xapian FTS
+ * This is used for massive ZIMs (kiwix_only) that skip pre-indexing
+ *
+ * @param {string} zimPath - Full path to ZIM file
+ * @param {string} query - Search query
+ * @param {Object} zim - ZIM library metadata
+ * @param {Object} options - Search options
+ * @returns {Promise<Array>} Array of search results with snippets
+ */
+async function searchZIMDirectly(zimPath, query, zim, options = {}) {
+  const { limit = 20, hostname = 'localhost' } = options;
+
+  try {
+    // Open archive
+    const archive = new Archive(zimPath);
+
+    // Create searcher
+    const searcher = new Searcher(archive);
+
+    // Perform search with Query object
+    const search = searcher.search(new Query(query));
+
+    // Get estimated match count
+    const estimatedMatches = search.getEstimatedMatches();
+
+    console.log(`🔍 libzim search: "${query}" in ${zim.title} - ~${estimatedMatches} matches`);
+
+    // Get results (start at 0, retrieve up to limit)
+    const results = search.getResults(0, limit);
+
+    // Format results for unified search
+    const formattedResults = [];
+    for (const entry of results) {
+      formattedResults.push({
+        zimId: zim.id,
+        zimTitle: zim.title,
+        zimCategory: zim.category || 'Other',
+        title: entry.title,
+        path: entry.path,
+        snippet: entry.snippet || '', // Xapian provides snippets!
+        url: `http://${hostname}:${KIWIX_PORT}/${zim.filename.replace('.zim', '')}/${entry.path}`,
+        type: 'zim-article-libzim', // New type to distinguish from kiwix HTTP search
+        estimatedMatches // Include total for UI display
+      });
+    }
+
+    zimLogger.search.detail(`libzim search completed`, {
+      zimTitle: zim.title,
+      query,
+      resultsCount: formattedResults.length,
+      estimatedMatches
+    });
+
+    return formattedResults;
+  } catch (err) {
+    console.error(`Error in libzim search for ${zim.title}:`, err);
+    zimLogger.search.error('libzim search failed', {
+      zimTitle: zim.title,
+      query,
+      error: err.message
+    });
+    return [];
+  }
+}
+
+/**
  * Discover articles using direct ZIM file access via libzim
  * @param {string} zimPath - Full path to ZIM file
  * @param {number} maxArticles - Maximum articles to discover
@@ -220,6 +286,33 @@ async function discoverArticlesViaLibzim(zimPath, maxArticles) {
     console.log(`  - Total entries: ${totalEntries.toLocaleString()}`);
     console.log(`  - All entries: ${allEntries.toLocaleString()}`);
     console.log(`  - Article count (from metadata): ${reportedArticles.toLocaleString()}`);
+
+    // CRITICAL: Skip ALL indexing for massive ZIMs (>5M articles)
+    // For massive ZIMs, we'll use on-demand Kiwix search instead of pre-indexing
+    // This avoids OOM crashes and storage bloat from indexing millions of articles
+    if (reportedArticles > 5000000) {
+      console.log(`🔍 MASSIVE ZIM detected (${reportedArticles.toLocaleString()} articles)`);
+      console.log(`   Article count exceeds 5M threshold`);
+      console.log(`   Recommendation: Skip indexing, use on-demand Kiwix search`);
+      console.log(`   Users can search directly via Kiwix (already implemented)`);
+
+      // Return special flag indicating we should skip indexing entirely
+      return {
+        articles: [],
+        skipIndexingEntirely: true, // NEW: Skip indexing, use Kiwix-only search
+        skipLibzimIteration: true,  // Keep for backward compatibility
+        samplingRate: 1,
+        originalArticleCount: reportedArticles,
+        stats: {
+          totalEntries,
+          articleCount: reportedArticles,
+          sampledCount: 0,
+          redirectCount: 0,
+          otherCount: 0,
+          totalProcessed: 0
+        }
+      };
+    }
 
     // Calculate sampling rate BEFORE iteration to prevent OOM
     let samplingRate = 1;
@@ -330,22 +423,65 @@ async function discoverArticlesViaLibzim(zimPath, maxArticles) {
 
 /**
  * Discover articles using kiwix-serve search (fallback method)
+ * Enhanced for massive ZIMs - uses multi-character prefixes for better coverage
  * @param {string} zimName - ZIM filename without extension
- * @param {number} maxArticles - Maximum articles to discover
+ * @param {number} maxArticles - Maximum articles to discover (0 = use default target)
  * @returns {Promise<Set>} Set of article URLs
  */
 async function discoverArticlesViaSearch(zimName, maxArticles) {
   const kiwixBaseUrl = `http://localhost:${KIWIX_PORT}`;
-  const searchTerms = [
+
+  // For massive ZIMs, use more search terms and pages to get better coverage
+  // Target: ~50K articles for massive ZIMs (reasonable sample of 18M)
+  const targetArticles = maxArticles > 0 ? maxArticles : 50000;
+
+  // Generate comprehensive search terms:
+  // - Single letters: a-z, 0-9 (36 terms)
+  // - Two-letter combos: aa, ab, ac, ... za, zb, zc (104 high-frequency combos)
+  const singleChars = [
     'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
     'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'
   ];
+
+  // Common two-letter prefixes for better Wikipedia coverage
+  const twoCharPrefixes = [
+    'ab', 'ac', 'ad', 'al', 'an', 'ar', 'as', 'at',
+    'ba', 'be', 'bi', 'bo', 'br', 'bu',
+    'ca', 'ce', 'ch', 'ci', 'cl', 'co', 'cr', 'cu',
+    'da', 'de', 'di', 'do', 'dr', 'du',
+    'ea', 'ec', 'ed', 'el', 'em', 'en', 'ep', 'er', 'es', 'ev', 'ex',
+    'fa', 'fe', 'fi', 'fo', 'fr', 'fu',
+    'ga', 'ge', 'gi', 'go', 'gr', 'gu',
+    'ha', 'he', 'hi', 'ho', 'hu',
+    'in', 'is', 'it',
+    'ja', 'je', 'jo', 'ju',
+    'ka', 'ke', 'ki', 'ko',
+    'la', 'le', 'li', 'lo', 'lu',
+    'ma', 'me', 'mi', 'mo', 'mu',
+    'na', 'ne', 'ni', 'no', 'nu',
+    'ob', 'of', 'on', 'op', 'or', 'ou', 'ov',
+    'pa', 'pe', 'ph', 'pi', 'pl', 'po', 'pr', 'pu',
+    'qu',
+    'ra', 're', 'ri', 'ro', 'ru',
+    'sa', 'sc', 'se', 'sh', 'si', 'so', 'sp', 'st', 'su',
+    'ta', 'te', 'th', 'ti', 'to', 'tr', 'tu',
+    'un', 'up', 'us',
+    'va', 've', 'vi', 'vo',
+    'wa', 'we', 'wh', 'wi', 'wo', 'wr',
+    'ye', 'yo'
+  ];
+
+  // Combine search terms: single chars first, then two-char prefixes
+  const searchTerms = [...singleChars, ...twoCharPrefixes];
+
   const discoveredArticles = new Set();
   const pageLength = 500;
-  const maxPagesPerTerm = 4;
+  const maxPagesPerTerm = 8; // Increased from 4 to 8 for better coverage
 
-  console.log(`Discovering articles via kiwix-serve search (fallback method)...`);
+  console.log(`Discovering articles via kiwix-serve search (enhanced fallback)...`);
+  console.log(`  Target: ${targetArticles.toLocaleString()} articles`);
+  console.log(`  Search strategy: ${singleChars.length} single-char + ${twoCharPrefixes.length} two-char prefixes`);
 
   for (const term of searchTerms) {
     for (let page = 0; page < maxPagesPerTerm; page++) {
@@ -356,21 +492,28 @@ async function discoverArticlesViaSearch(zimName, maxArticles) {
 
         const searchLinks = extractArticleLinks(searchResponse.data, zimName);
 
-        if (searchLinks.length === 0) break;
+        if (searchLinks.length === 0) break; // No more results for this term
 
         searchLinks.forEach(link => discoveredArticles.add(link));
 
-        if (discoveredArticles.size >= maxArticles) break;
+        // Log progress every 10K articles
+        if (discoveredArticles.size % 10000 === 0 && discoveredArticles.size > 0) {
+          console.log(`  Progress: ${discoveredArticles.size.toLocaleString()} articles discovered...`);
+        }
+
+        if (discoveredArticles.size >= targetArticles) break;
       } catch (err) {
         console.error(`Search failed for term "${term}" page ${page}:`, err.message);
-        break;
+        break; // Skip to next term on error
       }
     }
 
-    if (discoveredArticles.size >= maxArticles) break;
+    if (discoveredArticles.size >= targetArticles) break;
   }
 
-  console.log(`✓ Discovered ${discoveredArticles.size} articles via search`);
+  console.log(`✓ Discovered ${discoveredArticles.size.toLocaleString()} articles via search`);
+  console.log(`  Coverage: ${((discoveredArticles.size / targetArticles) * 100).toFixed(1)}% of target`);
+
   return discoveredArticles;
 }
 
@@ -401,6 +544,46 @@ async function indexZIMArticles(zim, options) {
       discoveryResult = await discoverArticlesViaLibzim(zimPath, maxArticles);
       discoveryStats = discoveryResult.stats;
       const samplingRate = discoveryResult.samplingRate || 1;
+
+      // Check if we should skip indexing entirely for massive ZIM
+      if (discoveryResult.skipIndexingEntirely) {
+        console.log(`✅ Skipping indexing for massive ZIM (${discoveryStats.articleCount.toLocaleString()} articles)`);
+        console.log(`   Search method: On-demand Kiwix search (no pre-indexing)`);
+        console.log(`   Status: Marking as completed with method 'kiwix_only'`);
+
+        // Mark as completed without indexing any articles
+        await safeDbRun(`
+          UPDATE zim_indexing_status
+          SET status = 'completed',
+              indexing_method = 'kiwix_only',
+              total_articles = 0,
+              indexed_articles = 0,
+              total_entries = ?,
+              actual_article_count = ?,
+              completed_at = CURRENT_TIMESTAMP,
+              progress_percent = 100
+          WHERE zim_id = ?
+        `, [
+          discoveryStats.totalEntries,
+          discoveryStats.articleCount,
+          zim.id
+        ]);
+
+        zimLogger.indexing.info(`Massive ZIM marked as kiwix_only - no indexing needed`, {
+          zimTitle: zim.title,
+          zimId: zim.id,
+          articleCount: discoveryStats.articleCount,
+          indexingMethod: 'kiwix_only'
+        });
+
+        return; // Exit early - no indexing needed
+      }
+
+      // Check if libzim iteration was skipped (but fallback might work)
+      if (discoveryResult.skipLibzimIteration) {
+        console.log(`ℹ️  Libzim iteration skipped for massive ZIM - triggering fallback...`);
+        throw new Error('Libzim iteration skipped for massive ZIM (>5M articles)');
+      }
 
       // Store just the article path without /content/zimname/ prefix
       // libzim returns paths like "100%_renewable_energy"
@@ -1049,5 +1232,6 @@ export default {
   resumeIndexing,
   resumeAllPausedJobs,
   clearIndexedArticles,
-  searchIndexedArticles
+  searchIndexedArticles,
+  searchZIMDirectly
 };

@@ -1,6 +1,7 @@
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import axios from 'axios';
-import { searchIndexedArticles } from './zimIndexingService.js';
+import path from 'path';
+import { searchIndexedArticles, searchZIMDirectly } from './zimIndexingService.js';
 
 const KIWIX_PORT = process.env.KIWIX_SERVE_PORT || 8080;
 
@@ -299,10 +300,10 @@ export async function getSearchSuggestions(prefix, limit = 10) {
  */
 export async function searchZIM(query, options = {}) {
   try {
-    const { zimId, limit = 20 } = options;
+    const { zimId, zimIds, limit = 20 } = options;
 
     // Check cache first
-    const cacheKey = `zim:${query}:${zimId || 'all'}:${limit}`;
+    const cacheKey = `zim:${query}:${zimId || zimIds?.join(',') || 'all'}:${limit}`;
     const cached = await getFromCache(cacheKey);
     if (cached) {
       console.log('✓ Returning cached ZIM search results');
@@ -318,6 +319,12 @@ export async function searchZIM(query, options = {}) {
     if (zimId) {
       const zim = await safeDbGet('SELECT * FROM zim_libraries WHERE id = ?', [zimId]);
       if (zim) zimsToSearch = [zim];
+    } else if (zimIds && zimIds.length > 0) {
+      const placeholders = zimIds.map(() => '?').join(',');
+      zimsToSearch = await safeDbAll(
+        `SELECT * FROM zim_libraries WHERE id IN (${placeholders}) AND hidden = 0 AND status = ?`,
+        [...zimIds, 'active']
+      );
     } else {
       zimsToSearch = await safeDbAll('SELECT * FROM zim_libraries WHERE hidden = 0 AND status = ?', ['active']);
     }
@@ -594,9 +601,42 @@ export async function unifiedSearch(query, options = {}) {
       results.content = await searchContent(query, options);
     }
 
-    // Search ZIM (kiwix-serve direct search) if enabled
+    // Search ZIM if enabled
+    // Use libzim direct search for kiwix_only ZIMs (massive ZIMs with no indexing)
+    // Use kiwix-serve HTTP API for other ZIMs
     if (includeZIM) {
-      results.zim = await searchZIM(query, options);
+      const hostname = options.hostname || 'localhost';
+
+      // Get kiwix_only ZIMs (massive ZIMs that skip indexing)
+      const kiwixOnlyZims = await safeDbAll(`
+        SELECT zl.*, zis.indexing_method
+        FROM zim_libraries zl
+        JOIN zim_indexing_status zis ON zl.id = zis.zim_id
+        WHERE zis.indexing_method = ? AND zl.status = ? AND zl.hidden = 0
+      `, ['kiwix_only', 'active']);
+
+      // Use libzim direct search for kiwix_only ZIMs (full-text search with Xapian)
+      for (const zim of kiwixOnlyZims) {
+        const zimPath = path.isAbsolute(zim.filepath)
+          ? zim.filepath
+          : path.join(process.cwd(), zim.filepath);
+        const libzimResults = await searchZIMDirectly(zimPath, query, zim, { limit: 20, hostname });
+        results.zim.push(...libzimResults);
+      }
+
+      // Use kiwix-serve HTTP search for other ZIMs (title-only matches)
+      const otherZims = await safeDbAll(`
+        SELECT zl.*
+        FROM zim_libraries zl
+        LEFT JOIN zim_indexing_status zis ON zl.id = zis.zim_id
+        WHERE (zis.indexing_method IS NULL OR zis.indexing_method != ?)
+          AND zl.status = ? AND zl.hidden = 0
+      `, ['kiwix_only', 'active']);
+
+      if (otherZims.length > 0) {
+        const kiwixResults = await searchZIM(query, { ...options, zimIds: otherZims.map(z => z.id) });
+        results.zim.push(...kiwixResults);
+      }
     }
 
     // Search indexed ZIM articles (FTS5) if enabled
@@ -606,8 +646,9 @@ export async function unifiedSearch(query, options = {}) {
     }
 
     // Combine and sort by relevance with weighted scoring
-    // Strategy: Boost indexed content (has full-text relevance) over title-only matches
+    // Strategy: Boost full-text indexed content over title-only matches
     // - Indexed ZIM articles (FTS5): 2.0× boost (full content matching with BM25)
+    // - libzim direct search (Xapian FTS): 1.8× boost (full content matching, on-demand)
     // - Content results (FTS5): 1.5× boost (local content)
     // - Kiwix-serve results: 0.5× scale (title-only matches, position-based)
     results.combined = [
@@ -621,7 +662,10 @@ export async function unifiedSearch(query, options = {}) {
       })),
       ...results.zim.map((r, idx) => ({
         ...r,
-        score: (1 / (idx + 1)) * 0.5 // Reduce kiwix-serve title-only matches
+        // Boost libzim direct search results (full-text), reduce kiwix HTTP (title-only)
+        score: r.type === 'zim-article-libzim'
+          ? (1 / (idx + 1)) * 1.8  // libzim Xapian FTS results
+          : (1 / (idx + 1)) * 0.5  // kiwix-serve title-only matches
       }))
     ].sort((a, b) => b.score - a.score).slice(0, limit);
 
