@@ -33,10 +33,6 @@ let mmapExceptionDetected = false; // Track if MMapException was detected in std
 // Track active downloads
 const activeDownloads = new Map(); // filename -> { url, progress, totalSize, downloadedSize, status, isUpdate }
 
-// Download queue to prevent concurrent downloads
-const downloadQueue = [];
-let isProcessingQueue = false;
-
 // Track update check status
 let updateCheckStatus = {
   isRunning: false,
@@ -1275,54 +1271,6 @@ router.get('/catalog', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-// Process next download in queue
-async function processNextDownload() {
-  if (isProcessingQueue || downloadQueue.length === 0) {
-    return;
-  }
-
-  // Check if any downloads are active
-  const activeCount = Array.from(activeDownloads.values())
-    .filter(d => d.status === 'downloading' || d.status === 'starting').length;
-
-  if (activeCount > 0) {
-    // Still downloading, wait
-    return;
-  }
-
-  isProcessingQueue = true;
-  const nextDownload = downloadQueue.shift();
-
-  if (!nextDownload) {
-    isProcessingQueue = false;
-    return;
-  }
-
-  try {
-    zimLogger.download.info(`Processing queued download: ${nextDownload.title || nextDownload.filename}`, {
-      queueRemaining: downloadQueue.length
-    });
-
-    // Re-create the download by making an internal request
-    // We'll trigger the actual download by calling the download logic
-    // For simplicity, we'll just log that we need to implement this
-    // The download will be picked up on next user-triggered download or we can auto-trigger
-    console.log(`TODO: Auto-start queued download for ${nextDownload.filename}`);
-
-  } catch (err) {
-    zimLogger.download.error('Error processing queued download', {
-      filename: nextDownload.filename,
-      error: err.message
-    });
-  } finally {
-    isProcessingQueue = false;
-    // Try to process next one
-    if (downloadQueue.length > 0) {
-      setTimeout(() => processNextDownload(), 1000);
-    }
-  }
-}
-
 // Download ZIM file from catalog
 router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
   let filename;
@@ -1381,37 +1329,6 @@ router.post('/download', authenticateToken, requireAdmin, async (req, res) => {
       zimLogger.download.warn('Download already in progress', { filename });
       endOperation(operationId, false);
       return res.status(400).json({ error: 'Download already in progress' });
-    }
-
-    // Check if another download is active - if so, add to queue
-    const activeCount = Array.from(activeDownloads.values())
-      .filter(d => d.status === 'downloading' || d.status === 'starting').length;
-
-    if (activeCount > 0) {
-      // Add to queue instead of downloading immediately
-      zimLogger.download.info(`Download queued: ${title || filename} (${downloadQueue.length + 1} in queue)`, { filename });
-
-      downloadQueue.push({
-        url,
-        title,
-        description,
-        language,
-        size,
-        articleCount,
-        mediaCount,
-        updated,
-        filename,
-        filepath,
-        operationId,
-        userId: req.user?.id
-      });
-
-      endOperation(operationId, false);
-      return res.json({
-        message: 'Download queued - will start when current download completes',
-        filename,
-        queuePosition: downloadQueue.length
-      });
     }
 
     // Check disk space before starting

@@ -104,7 +104,8 @@ export async function startZIMIndexing(zimId, options = {}) {
   try {
     const {
       maxArticles = process.env.ZIM_INDEX_MAX_ARTICLES ? parseInt(process.env.ZIM_INDEX_MAX_ARTICLES) : 0, // 0 = unlimited
-      batchSize = 50, // Process in batches
+      batchSize = 500, // Increased from 50 to 500 for better performance
+      concurrency = 10, // Process 10 articles concurrently
       hostname = 'localhost'
     } = options;
 
@@ -149,7 +150,7 @@ export async function startZIMIndexing(zimId, options = {}) {
     activeJobs.set(zimId, jobInfo);
 
     // Start indexing in background
-    indexZIMArticles(zim, { maxArticles, batchSize, hostname, jobInfo })
+    indexZIMArticles(zim, { maxArticles, batchSize, concurrency, hostname, jobInfo })
       .then(async () => {
         console.log(`✓ Completed indexing for ZIM: ${zim.title}`);
 
@@ -342,7 +343,7 @@ async function discoverArticlesViaSearch(zimName, maxArticles) {
  * Index articles from a ZIM file
  */
 async function indexZIMArticles(zim, options) {
-  const { maxArticles, batchSize, hostname, jobInfo } = options;
+  const { maxArticles, batchSize, concurrency, hostname, jobInfo } = options;
 
   try {
     const zimName = zim.filename.replace('.zim', '');
@@ -426,9 +427,59 @@ async function indexZIMArticles(zim, options) {
       `, [articlesToIndex.length, zim.id]);
     }
 
-    console.log(`Indexing ${articlesToIndex.length} articles from ${zim.title}...`);
+    // Step 3.5: Apply smart sampling for large ZIMs
+    let samplingRate = 1; // 1 = no sampling (100%)
+    let isSampled = false;
+    const originalCount = articlesToIndex.length;
 
-    // Step 4: Fetch and index articles in batches
+    if (maxArticles === 0) { // Only apply smart sampling if no manual limit set
+      if (articlesToIndex.length >= 1000000) {
+        // 1M+ articles: sample every 500th article (0.2%)
+        samplingRate = 500;
+        isSampled = true;
+        console.log(`📊 Large ZIM detected (${articlesToIndex.length.toLocaleString()} articles)`);
+        console.log(`   Applying smart sampling: 1 in ${samplingRate} articles`);
+      } else if (articlesToIndex.length >= 100000) {
+        // 100K-1M articles: sample every 50th article (2%)
+        samplingRate = 50;
+        isSampled = true;
+        console.log(`📊 Medium-large ZIM detected (${articlesToIndex.length.toLocaleString()} articles)`);
+        console.log(`   Applying smart sampling: 1 in ${samplingRate} articles`);
+      } else if (articlesToIndex.length >= 10000) {
+        // 10K-100K articles: sample every 5th article (20%)
+        samplingRate = 5;
+        isSampled = true;
+        console.log(`📊 Medium ZIM detected (${articlesToIndex.length.toLocaleString()} articles)`);
+        console.log(`   Applying smart sampling: 1 in ${samplingRate} articles`);
+      }
+
+      if (isSampled) {
+        // Sample articles evenly across the list
+        const sampledArticles = [];
+        for (let i = 0; i < articlesToIndex.length; i += samplingRate) {
+          sampledArticles.push(articlesToIndex[i]);
+        }
+        articlesToIndex = sampledArticles;
+        jobInfo.total = articlesToIndex.length;
+
+        // Update status to indicate sampling
+        await safeDbRun(`
+          UPDATE zim_indexing_status
+          SET total_articles = ?,
+              is_sampled = 1,
+              sampling_rate = ?,
+              original_article_count = ?
+          WHERE zim_id = ?
+        `, [articlesToIndex.length, samplingRate, originalCount, zim.id]);
+
+        console.log(`   ✓ Sampling complete: ${articlesToIndex.length.toLocaleString()} articles selected`);
+        console.log(`   Storage reduction: ${((1 - articlesToIndex.length / originalCount) * 100).toFixed(1)}%`);
+      }
+    }
+
+    console.log(`Indexing ${articlesToIndex.length.toLocaleString()} articles from ${zim.title}${isSampled ? ' (sampled)' : ''}...`);
+
+    // Step 4: Fetch and index articles in batches with parallel processing
     for (let i = 0; i < articlesToIndex.length; i += batchSize) {
       // Check for cancellation
       if (jobInfo.cancelled) {
@@ -490,82 +541,98 @@ async function indexZIMArticles(zim, options) {
 
       const batch = articlesToIndex.slice(i, i + batchSize);
 
-      for (const articleUrl of batch) {
-        // Check for cancellation before each article
+      // Process articles in parallel chunks of concurrency size
+      const articlesData = [];
+      for (let j = 0; j < batch.length; j += concurrency) {
+        // Check for cancellation
         if (jobInfo.cancelled) {
           console.log(`Indexing cancelled for ${zim.title} at ${jobInfo.indexed}/${jobInfo.total} articles`);
           throw new Error('Indexing cancelled by user');
         }
 
-        try {
-          await indexSingleArticle(zim, articleUrl, kiwixBaseUrl);
-          jobInfo.indexed++;
+        const chunk = batch.slice(j, j + concurrency);
 
-          // Record success for circuit breaker (every 50 articles to avoid overhead)
-          if (jobInfo.indexed % 50 === 0) {
+        // Fetch articles in parallel
+        const results = await Promise.allSettled(
+          chunk.map(articleUrl => fetchArticleData(zim, articleUrl, kiwixBaseUrl))
+        );
+
+        // Process results
+        for (let k = 0; k < results.length; k++) {
+          const result = results[k];
+          const articleUrl = chunk[k];
+
+          if (result.status === 'fulfilled' && result.value) {
+            // Successfully fetched article data
+            articlesData.push(result.value);
+            jobInfo.indexed++;
             recordSuccess();
-          }
+          } else {
+            // Error occurred
+            jobInfo.errors++;
+            const err = result.reason || new Error('Failed to fetch article');
 
-          // Update progress every 10 articles
-          if (jobInfo.indexed % 10 === 0) {
-            const progress = (jobInfo.indexed / jobInfo.total) * 100;
-            await safeDbRun(`
-              UPDATE zim_indexing_status
-              SET indexed_articles = ?, progress_percent = ?
-              WHERE zim_id = ?
-            `, [jobInfo.indexed, progress, zim.id]);
+            // Categorize the error
+            let errorType = 'other';
+            if (err.response?.status === 404 || result.value === null) {
+              errorType = '404_not_found';
+            } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET') {
+              errorType = 'connection_error';
+              recordFailure();
+            } else if (err.message?.includes('timeout')) {
+              errorType = 'timeout';
+              recordFailure();
+            }
 
-            zimLogger.indexing.verbose(`Progress: ${jobInfo.indexed}/${jobInfo.total} (${progress.toFixed(1)}%)`);
-          }
-        } catch (err) {
-          jobInfo.errors++;
+            jobInfo.errorTypes[errorType] = (jobInfo.errorTypes[errorType] || 0) + 1;
 
-          // Categorize the error
-          let errorType = 'other';
-          let isConnectionError = false;
+            if (jobInfo.errorSamples.length < 5) {
+              jobInfo.errorSamples.push({
+                article: articleUrl,
+                error: err.message || 'Unknown error',
+                type: errorType
+              });
+            }
 
-          if (err.response?.status === 404) {
-            errorType = '404_not_found';
-          } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET') {
-            errorType = 'connection_error';
-            isConnectionError = true;
-            recordFailure(); // Record in circuit breaker
-          } else if (err.message.includes('timeout')) {
-            errorType = 'timeout';
-            isConnectionError = true;
-            recordFailure(); // Record in circuit breaker
-          } else if (typeof err.response?.data !== 'string' || !err.response?.data.includes('<')) {
-            errorType = 'non_html_content';
-          }
-
-          // Track error types
-          jobInfo.errorTypes[errorType] = (jobInfo.errorTypes[errorType] || 0) + 1;
-
-          // Only store first 5 error samples for later reporting
-          if (jobInfo.errorSamples.length < 5) {
-            jobInfo.errorSamples.push({
-              article: articleUrl,
-              error: err.message,
-              type: errorType
-            });
-          }
-
-          // Only log the first 10 unexpected errors to avoid spam
-          if (jobInfo.errors <= 10 && errorType !== '404_not_found' && errorType !== 'non_html_content') {
-            zimLogger.indexing.warn(`Error indexing article: ${articleUrl}`, {
-              error: err.message,
-              errorType,
-              zimTitle: zim.title
-            });
-          } else if (jobInfo.errors === 11) {
-            // After 10 errors, log a summary message
-            zimLogger.indexing.info('Suppressing further error logs (will provide summary at end)', {
-              zimTitle: zim.title,
-              errorsLogged: 10
-            });
+            // Log first 10 unexpected errors
+            if (jobInfo.errors <= 10 && errorType !== '404_not_found') {
+              zimLogger.indexing.warn(`Error indexing article: ${articleUrl}`, {
+                error: err.message || 'Unknown error',
+                errorType,
+                zimTitle: zim.title
+              });
+            } else if (jobInfo.errors === 11) {
+              zimLogger.indexing.info('Suppressing further error logs (will provide summary at end)', {
+                zimTitle: zim.title,
+                errorsLogged: 10
+              });
+            }
           }
         }
       }
+
+      // Bulk insert all collected articles
+      if (articlesData.length > 0) {
+        try {
+          await bulkInsertArticles(articlesData);
+        } catch (dbErr) {
+          zimLogger.indexing.error('Bulk insert failed', {
+            error: dbErr.message,
+            articleCount: articlesData.length,
+            zimTitle: zim.title
+          });
+        }
+      }
+
+      // Update progress after each batch
+      const progress = (jobInfo.indexed / jobInfo.total) * 100;
+      await safeDbRun(`
+        UPDATE zim_indexing_status
+        SET indexed_articles = ?, progress_percent = ?
+        WHERE zim_id = ?
+      `, [jobInfo.indexed, progress, zim.id]);
+
+      zimLogger.indexing.verbose(`Progress: ${jobInfo.indexed.toLocaleString()}/${jobInfo.total.toLocaleString()} (${progress.toFixed(1)}%)`);
 
       // Longer delay between batches to avoid overwhelming kiwix-serve
       // Increased from 100ms to 500ms to reduce crash risk
@@ -644,13 +711,12 @@ function extractArticleLinks(html, zimName) {
 }
 
 /**
- * Index a single article
+ * Fetch and parse article data (doesn't write to DB)
+ * Returns article data object or null if invalid
  */
-async function indexSingleArticle(zim, articlePath, baseUrl) {
+async function fetchArticleData(zim, articlePath, baseUrl) {
   try {
     // Construct kiwix-serve URL
-    // articlePath is just the path like "How_to_Blow_Up_a_Pipeline"
-    // kiwix-serve expects /content/zimname/path
     const zimName = zim.filename.replace('.zim', '');
     const kiwixUrl = `${baseUrl}/content/${zimName}/${articlePath}`;
 
@@ -663,22 +729,15 @@ async function indexSingleArticle(zim, articlePath, baseUrl) {
     const html = response.data;
 
     // Validate that we got HTML content
-    if (typeof html !== 'string') {
-      // Skip non-HTML content silently (likely binary or JSON data)
-      return;
-    }
-
-    // Check if this looks like HTML at all
-    if (!html.includes('<') && !html.includes('>')) {
-      // Not HTML, skip it
-      return;
+    if (typeof html !== 'string' || (!html.includes('<') && !html.includes('>'))) {
+      return null;
     }
 
     // Extract title
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
     const title = titleMatch ? stripHtml(titleMatch[1]) : articlePath.split('/').pop();
 
-    // Extract main content (try multiple selectors)
+    // Extract main content
     let content = '';
     const contentMatchers = [
       /<article[^>]*>([\s\S]*?)<\/article>/i,
@@ -695,43 +754,44 @@ async function indexSingleArticle(zim, articlePath, baseUrl) {
       }
     }
 
-    // Limit content length to prevent database bloat
-    const MAX_CONTENT_LENGTH = 10000; // 10KB per article
+    // Reduced content length for better storage efficiency
+    const MAX_CONTENT_LENGTH = 2000; // Reduced from 10KB to 2KB
     if (content.length > MAX_CONTENT_LENGTH) {
       content = content.substring(0, MAX_CONTENT_LENGTH);
     }
 
-    // Create snippet (first 200 chars)
+    // Create snippet
     const snippet = content.substring(0, 200).trim();
 
-    // Check if article already exists
-    // Store the clean article path (without /content/zimname/ prefix)
-    const existing = await safeDbGet(
-      'SELECT id FROM zim_articles WHERE zim_id = ? AND article_url = ?',
-      [zim.id, articlePath]
-    );
-
-    if (existing) {
-      // Update existing
-      await safeDbRun(`
-        UPDATE zim_articles
-        SET title = ?, content = ?, snippet = ?, indexed_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [title, content, snippet, existing.id]);
-    } else {
-      // Insert new
-      await safeDbRun(`
-        INSERT INTO zim_articles (zim_id, article_url, title, content, snippet)
-        VALUES (?, ?, ?, ?, ?)
-      `, [zim.id, articlePath, title, content, snippet]);
-    }
+    return {
+      zimId: zim.id,
+      articlePath,
+      title,
+      content,
+      snippet
+    };
   } catch (err) {
     if (err.response?.status === 404) {
-      // Article not found, skip
-      return;
+      return null; // Article not found
     }
     throw err;
   }
+}
+
+/**
+ * Bulk insert articles into database (much faster than individual inserts)
+ */
+async function bulkInsertArticles(articles) {
+  if (articles.length === 0) return;
+
+  // Use INSERT OR REPLACE for upsert behavior
+  const placeholders = articles.map(() => '(?, ?, ?, ?, ?)').join(', ');
+  const values = articles.flatMap(a => [a.zimId, a.articlePath, a.title, a.content, a.snippet]);
+
+  await safeDbRun(`
+    INSERT OR REPLACE INTO zim_articles (zim_id, article_url, title, content, snippet)
+    VALUES ${placeholders}
+  `, values);
 }
 
 /**

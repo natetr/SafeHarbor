@@ -949,6 +949,23 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add sampling columns for smart sampling feature
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN is_sampled INTEGER DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN sampling_rate INTEGER DEFAULT 1`);
+  } catch (err) {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN original_article_count INTEGER DEFAULT 0`);
+  } catch (err) {
+    // Column already exists
+  }
+
   // Initialize auto-indexing setting (default: off)
   const autoIndexSetting = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('auto_index_new_zims');
   if (!autoIndexSetting) {

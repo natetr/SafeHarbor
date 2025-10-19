@@ -1,0 +1,18 @@
+{
+  "watch": ["server/**/*.js"],
+  "ignore": [
+    "data/**",
+    "*.db",
+    "*.db-wal",
+    "*.db-shm",
+    "*.db.backup*",
+    "crash-logs/**",
+    "node_modules/**",
+    "client/**",
+    "zim/**",
+    "content/**",
+    "uploads/**"
+  ],
+  "ext": "js,json",
+  "delay": 1000
+}
