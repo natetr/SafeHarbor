@@ -650,7 +650,7 @@ export async function unifiedSearch(query, options = {}) {
     // Combine and sort by relevance with weighted scoring
     // Strategy: Boost full-text indexed content over title-only matches
     // - Indexed ZIM articles (FTS5): 2.0× boost (full content matching with BM25)
-    // - libzim direct search (Xapian FTS): 1.8× boost (full content matching, on-demand)
+    // - libzim direct search (Xapian FTS): 2.0× boost (full content matching, on-demand)
     // - Content results (FTS5): 1.5× boost (local content)
     // - Kiwix-serve results: 0.5× scale (title-only matches, position-based)
     results.combined = [
@@ -664,9 +664,9 @@ export async function unifiedSearch(query, options = {}) {
       })),
       ...results.zim.map((r, idx) => ({
         ...r,
-        // Boost libzim direct search results (full-text), reduce kiwix HTTP (title-only)
+        // Boost libzim direct search results (full-text) same as indexed, reduce kiwix HTTP (title-only)
         score: r.type === 'zim-article-libzim'
-          ? (1 / (idx + 1)) * 1.8  // libzim Xapian FTS results
+          ? (20 - idx) * 2.0  // libzim Xapian FTS results - position-weighted but highly boosted
           : (1 / (idx + 1)) * 0.5  // kiwix-serve title-only matches
       }))
     ].sort((a, b) => b.score - a.score).slice(0, limit);
