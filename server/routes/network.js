@@ -360,14 +360,8 @@ router.post('/mode/switch', authenticateToken, requireAdmin, async (req, res) =>
       await NetworkManager.stopHotspot();
       result = await NetworkManager.enableWiFiMode();
 
-      // Try to connect to saved network if available
-      if (config.home_network_ssid && config.home_network_password) {
-        const connectResult = await NetworkManager.connectToWiFi(
-          config.home_network_ssid,
-          config.home_network_password
-        );
-        result.wifiConnection = connectResult;
-      }
+      // Don't auto-connect here - let the frontend handle connection
+      // This prevents conflicts when user is trying to connect to a specific network
     }
 
     if (result.success) {

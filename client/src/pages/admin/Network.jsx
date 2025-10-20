@@ -553,7 +553,8 @@ export default function AdminNetwork() {
                       justifyContent: 'space-between',
                       alignItems: 'center',
                       cursor: 'pointer',
-                      backgroundColor: status?.wifi?.ssid === network.ssid ? '#d4e9ff' : 'transparent'
+                      backgroundColor: status?.wifi?.ssid === network.ssid ? '#d4e9ff' : 'transparent',
+                      color: status?.wifi?.ssid === network.ssid ? '#0f172a' : 'inherit'
                     }}
                     onClick={() => {
                       const password = prompt(`Enter password for "${network.ssid}"`);

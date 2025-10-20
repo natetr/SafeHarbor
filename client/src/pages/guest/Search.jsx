@@ -167,10 +167,9 @@ export default function GuestSearch() {
       // Already absolute, use as-is (direct to kiwix-serve)
       return url;
     } else {
-      // Relative URL, prepend backend URL in dev mode
-      return import.meta.env.DEV
-        ? `http://localhost:4000${url}`
-        : url;
+      // Relative URL - always use as-is (server will handle proxy)
+      // The backend proxies ZIM content through /api/zim/:id/content/:path
+      return url;
     }
   };
 

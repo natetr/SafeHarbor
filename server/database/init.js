@@ -966,6 +966,14 @@ export function initDatabase() {
     // Column already exists
   }
 
+  // Add indexing method column for massive ZIM handling
+  // Values: 'full' (normal indexing), 'sampled' (smart sampling), 'kiwix_only' (no indexing, use Kiwix search)
+  try {
+    db.exec(`ALTER TABLE zim_indexing_status ADD COLUMN indexing_method TEXT DEFAULT 'full'`);
+  } catch (err) {
+    // Column already exists
+  }
+
   // Initialize auto-indexing setting (default: off)
   const autoIndexSetting = db.prepare('SELECT value FROM system_settings WHERE key = ?').get('auto_index_new_zims');
   if (!autoIndexSetting) {

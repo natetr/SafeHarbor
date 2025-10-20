@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
+import { networkLogger } from '../utils/networkLogger.js';
 
 const execAsync = promisify(exec);
 
@@ -38,7 +39,7 @@ export async function getNetworkMode() {
 
     return 'unknown';
   } catch (err) {
-    console.error('Error detecting network mode:', err);
+    networkLogger.error('Error detecting network mode', { error: err.message });
     return 'unknown';
   }
 }
@@ -77,7 +78,7 @@ export async function getWiFiStatus() {
       interface: INTERFACE
     };
   } catch (err) {
-    console.error('Error getting WiFi status:', err);
+    networkLogger.error('Error getting WiFi status', { error: err.message });
     return {
       connected: false,
       ssid: null,
@@ -207,7 +208,7 @@ export async function scanNetworks() {
 
     return uniqueNetworks;
   } catch (err) {
-    console.error('Error scanning networks:', err);
+    networkLogger.error('Error scanning networks', { error: err.message });
     return [];
   }
 }
@@ -229,7 +230,7 @@ export async function getSavedConnections() {
 
     return connections;
   } catch (err) {
-    console.error('Error getting saved connections:', err);
+    networkLogger.error('Error getting saved connections', { error: err.message });
     return [];
   }
 }
@@ -322,7 +323,7 @@ export async function deleteConnection(connectionName) {
  */
 export async function startHotspot(config) {
   try {
-    console.log('Starting hotspot mode...');
+    networkLogger.info('Starting hotspot mode...');
 
     // Stop any existing hotspot services
     await execAsync('sudo killall hostapd 2>/dev/null || true');
@@ -335,29 +336,57 @@ export async function startHotspot(config) {
     // Wait for interface to settle
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Configure interface
+    // Configure interface for stability
     await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
     await execAsync(`sudo ip addr add 192.168.4.1/24 dev ${INTERFACE}`);
     await execAsync(`sudo ip link set ${INTERFACE} up`);
 
-    // Create hostapd configuration
+    // Critical stability fixes for Raspberry Pi WiFi
+    // Disable power save to prevent signal dropouts
+    await execAsync(`sudo iw dev ${INTERFACE} set power_save off`);
+    networkLogger.verbose('✓ Power save disabled for stable AP mode');
+
+    // Set regulatory domain to ensure proper channel availability
+    await execAsync('sudo iw reg set US');
+    networkLogger.verbose('✓ Regulatory domain set to US');
+
+    // Create hostapd configuration with stability enhancements
+    // Note: BCM4345/6 (Raspberry Pi 5) only supports 20 MHz channels in AP mode
+    // This limits max throughput to ~70 Mbps link speed (~10-30 Mbps real-world with NAT)
     const broadcast = config.broadcast_ssid !== false ? 0 : 1; // 0 = visible, 1 = hidden
     const hostapdConf = `
 interface=${INTERFACE}
 driver=nl80211
 ssid=${config.hotspot_ssid || 'SafeHarbor'}
 hw_mode=g
-channel=7
-wmm_enabled=0
+channel=6
+country_code=US
+ieee80211n=1
+
+${config.hotspot_open ? '' : `# Security
+wpa=2
+wpa_passphrase=${config.hotspot_password || 'safeharbor'}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=TKIP CCMP
+rsn_pairwise=CCMP
+`}
+# Access control
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=${broadcast}
-${config.hotspot_open ? '' : `wpa=2
-wpa_passphrase=${config.hotspot_password || 'safeharbor'}
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
-rsn_pairwise=CCMP`}
 max_num_sta=${config.connection_limit || 10}
+
+# Stability parameters for Raspberry Pi
+wmm_enabled=1
+beacon_int=100
+dtim_period=2
+rts_threshold=2347
+preamble=1
+ap_max_inactivity=300
+
+# Logging
+logger_syslog=-1
+logger_syslog_level=2
 `;
 
     fs.writeFileSync('/tmp/hostapd.conf', hostapdConf);
@@ -365,32 +394,23 @@ max_num_sta=${config.connection_limit || 10}
     // Create dnsmasq configuration
     const domain = config.hotspot_domain || 'safeharbor.local';
 
-    // Get upstream DNS servers from eth0 if available (for LAN passthrough)
+    // Configure upstream DNS servers for LAN passthrough
+    // Use local network DNS (192.168.0.1) since Google DNS is unreachable due to subnet overlap
+    // eth0 is 192.168.4.239/22 and wlan0 is 192.168.4.1/24 causing routing conflicts
     let upstreamDNS = '';
     if (config.lan_passthrough) {
       try {
         const ethStatus = await getEthernetStatus();
         if (ethStatus.connected) {
-          // Get DNS servers from resolv.conf
-          const { stdout: resolvConf } = await execAsync('cat /etc/resolv.conf 2>/dev/null || true');
-          const dnsServers = resolvConf.match(/nameserver\s+(\d+\.\d+\.\d+\.\d+)/g);
-          if (dnsServers && dnsServers.length > 0) {
-            // Use the system's DNS servers as upstream
-            upstreamDNS = dnsServers.map(line => {
-              const match = line.match(/nameserver\s+(\d+\.\d+\.\d+\.\d+)/);
-              return match ? `server=${match[1]}` : '';
-            }).filter(Boolean).join('\n');
-            console.log('Using upstream DNS servers for LAN passthrough');
-          }
+          // Use local network's DNS server which is reachable
+          upstreamDNS = 'server=192.168.0.1';
+          networkLogger.verbose('Using local network DNS for LAN passthrough');
         }
       } catch (err) {
-        console.warn('Could not get upstream DNS servers:', err.message);
+        networkLogger.warn('Could not configure DNS servers:', { error: err.message });
+        // Fallback to local DNS
+        upstreamDNS = 'server=192.168.0.1';
       }
-    }
-
-    // Fallback to common public DNS if no upstream found
-    if (!upstreamDNS && config.lan_passthrough) {
-      upstreamDNS = 'server=8.8.8.8\nserver=8.8.4.4';
     }
 
     const dnsmasqConf = `
@@ -414,10 +434,17 @@ ${config.lan_passthrough ? '' : 'no-resolv'}
 
     // Start hostapd
     await execAsync('sudo hostapd /tmp/hostapd.conf -B');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Verify hostapd is running
     await execAsync('pidof hostapd');
+
+    // Critical: Verify wlan0 carrier is UP before proceeding
+    const { stdout: linkStatus } = await execAsync(`ip link show ${INTERFACE}`);
+    if (!linkStatus.includes('state UP') || linkStatus.includes('NO-CARRIER')) {
+      throw new Error('wlan0 failed to bring carrier up - AP mode not functional');
+    }
+    networkLogger.verbose('✓ wlan0 carrier verified UP');
 
     // Start dnsmasq
     await execAsync('sudo dnsmasq -C /tmp/dnsmasq.conf');
@@ -430,7 +457,7 @@ ${config.lan_passthrough ? '' : 'no-resolv'}
       await enableLANPassthrough();
     }
 
-    console.log('Hotspot mode started successfully');
+    networkLogger.success('Hotspot mode started successfully');
     return {
       success: true,
       message: 'Hotspot started',
@@ -438,7 +465,7 @@ ${config.lan_passthrough ? '' : 'no-resolv'}
       ip: '192.168.4.1'
     };
   } catch (err) {
-    console.error('Error starting hotspot:', err);
+    networkLogger.error('Error starting hotspot', { error: err.message, stack: err.stack });
 
     // Cleanup on failure
     await execAsync('sudo killall hostapd 2>/dev/null || true');
@@ -457,7 +484,7 @@ ${config.lan_passthrough ? '' : 'no-resolv'}
  */
 export async function stopHotspot() {
   try {
-    console.log('Stopping hotspot mode...');
+    networkLogger.info('Stopping hotspot mode...');
 
     // Stop services
     await execAsync('sudo killall hostapd 2>/dev/null || true');
@@ -470,7 +497,7 @@ export async function stopHotspot() {
     await execAsync(`sudo ip addr flush dev ${INTERFACE}`);
     await execAsync(`sudo ip link set ${INTERFACE} down`);
 
-    console.log('Hotspot mode stopped');
+    networkLogger.success('Hotspot mode stopped');
     return {
       success: true,
       message: 'Hotspot stopped'
@@ -489,28 +516,31 @@ export async function stopHotspot() {
  */
 export async function enableLANPassthrough() {
   try {
-    console.log('Starting LAN passthrough setup...');
+    networkLogger.verbose('Starting LAN passthrough setup...');
 
     // Check if ethernet is available
     const ethStatus = await getEthernetStatus();
     if (!ethStatus.connected) {
-      console.log('LAN passthrough: Ethernet not connected, skipping');
+      networkLogger.verbose('LAN passthrough: Ethernet not connected, skipping');
       return {
         success: false,
         message: 'Ethernet not connected'
       };
     }
 
-    console.log(`LAN passthrough: Ethernet connected at ${ethStatus.ip}`);
+    networkLogger.verbose(`LAN passthrough: Ethernet connected at ${ethStatus.ip}`);
 
-    // First, clean up any existing rules to prevent duplicates
-    await disableLANPassthrough();
+    // First, clean up any existing rules to prevent duplicates (silent mode)
+    networkLogger.verbose('Cleaning existing NAT rules...');
+    await execAsync('sudo iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || true');
+    await execAsync(`sudo iptables -D FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true`);
+    await execAsync(`sudo iptables -D FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT 2>/dev/null || true`);
 
     // Wait a moment for cleanup to complete
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 300));
 
     // Enable IP forwarding (both immediate and persistent)
-    console.log('Enabling IP forwarding...');
+    networkLogger.verbose('Enabling IP forwarding...');
 
     // Immediate enable via sysctl
     await execAsync('sudo sysctl -w net.ipv4.ip_forward=1');
@@ -523,9 +553,9 @@ export async function enableLANPassthrough() {
       await execAsync('sudo cp /tmp/99-safeharbor-forwarding.conf /etc/sysctl.d/99-safeharbor-forwarding.conf');
       await execAsync('sudo rm /tmp/99-safeharbor-forwarding.conf');
       await execAsync('sudo sysctl -p /etc/sysctl.d/99-safeharbor-forwarding.conf 2>/dev/null || true');
-      console.log('✓ IP forwarding made persistent');
+      networkLogger.verbose('✓ IP forwarding made persistent');
     } catch (err) {
-      console.warn('Warning: Could not make IP forwarding persistent:', err.message);
+      networkLogger.verboseWarn('Could not make IP forwarding persistent', { error: err.message });
     }
 
     // Verify IP forwarding is enabled
@@ -533,34 +563,73 @@ export async function enableLANPassthrough() {
     if (ipForwardStatus.stdout.trim() !== '1') {
       throw new Error('IP forwarding not enabled');
     }
-    console.log('✓ IP forwarding enabled');
+    networkLogger.verbose('✓ IP forwarding enabled');
 
     // Set up NAT with verification
-    console.log('Setting up iptables NAT rules...');
+    networkLogger.verbose('Setting up iptables NAT rules...');
 
     // Rule 1: MASQUERADE for outbound traffic on eth0
     await execAsync('sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE');
-    console.log('✓ NAT POSTROUTING rule added (MASQUERADE on eth0)');
+    networkLogger.verbose('✓ NAT POSTROUTING rule added (MASQUERADE on eth0)');
 
     // Rule 2: Allow established/related connections from eth0 to wlan0
     await execAsync(`sudo iptables -A FORWARD -i eth0 -o ${INTERFACE} -m state --state RELATED,ESTABLISHED -j ACCEPT`);
-    console.log(`✓ FORWARD rule added (eth0 → ${INTERFACE} ESTABLISHED/RELATED)`);
+    networkLogger.verbose(`✓ FORWARD rule added (eth0 → ${INTERFACE} ESTABLISHED/RELATED)`);
 
     // Rule 3: Allow all traffic from wlan0 to eth0
     await execAsync(`sudo iptables -A FORWARD -i ${INTERFACE} -o eth0 -j ACCEPT`);
-    console.log(`✓ FORWARD rule added (${INTERFACE} → eth0 ALL)`);
+    networkLogger.verbose(`✓ FORWARD rule added (${INTERFACE} → eth0 ALL)`);
 
     // Rule 4: Allow DNS queries to be forwarded
     await execAsync('sudo iptables -A INPUT -i wlan0 -p udp --dport 53 -j ACCEPT 2>/dev/null || true');
     await execAsync('sudo iptables -A INPUT -i wlan0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true');
-    console.log('✓ DNS forwarding rules added');
+    networkLogger.verbose('✓ DNS forwarding rules added');
 
     // Save iptables rules for persistence
     try {
       await execAsync('sudo iptables-save | sudo tee /etc/iptables/rules.v4 > /dev/null 2>&1 || sudo netfilter-persistent save 2>/dev/null || true');
-      console.log('✓ iptables rules saved for persistence');
+      networkLogger.verbose('✓ iptables rules saved for persistence');
     } catch (err) {
-      console.warn('Warning: Could not save iptables rules for persistence');
+      networkLogger.verboseWarn('Could not save iptables rules for persistence');
+    }
+
+    // FIX: Force source IP for locally-originated traffic
+    // Problem: When device has wlan0=192.168.4.1 and LAN gateway=192.168.4.1,
+    // locally-originated packets may use wrong source IP confusing the gateway
+    // Solution: Use policy routing to force eth0 source IP for local traffic
+    networkLogger.verbose('Setting up routing for device internet access...');
+
+    try {
+      // Clean up any previous rules
+      await execAsync('sudo ip rule del iif lo table 100 2>/dev/null || true');
+      await execAsync('sudo ip route flush table 100 2>/dev/null || true');
+
+      // Get the LAN gateway and eth0 IP
+      const { stdout: gatewayInfo } = await execAsync('ip route show dev eth0 | grep default');
+      const gatewayMatch = gatewayInfo.match(/default via ([\d.]+)/);
+      const { stdout: eth0Info } = await execAsync('ip addr show eth0 | grep "inet "');
+      const eth0IpMatch = eth0Info.match(/inet ([\d.]+)/);
+
+      if (gatewayMatch && gatewayMatch[1] && eth0IpMatch && eth0IpMatch[1]) {
+        const lanGateway = gatewayMatch[1];
+        const eth0Ip = eth0IpMatch[1];
+        networkLogger.verbose(`Gateway ${lanGateway}, eth0 IP ${eth0Ip}`);
+
+        // Create routing table 100 for locally-originated traffic
+        // This ensures packets from the device itself use eth0's IP as source
+        await execAsync(`sudo ip route add default via ${lanGateway} dev eth0 src ${eth0Ip} table 100`);
+        await execAsync(`sudo ip route add 192.168.4.0/24 dev wlan0 scope link src 192.168.4.1 table 100`);
+        await execAsync(`sudo ip route add 192.168.4.0/22 dev eth0 scope link src ${eth0Ip} table 100`);
+
+        // Route locally-originated traffic (iif lo = from loopback/local) through table 100
+        await execAsync('sudo ip rule add iif lo table 100 priority 100');
+
+        networkLogger.verbose('✓ Device routing configured (local traffic uses eth0 source IP)');
+      } else {
+        networkLogger.verboseWarn('Could not detect LAN gateway or eth0 IP');
+      }
+    } catch (err) {
+      networkLogger.verboseWarn('Could not set up device routing', { error: err.message });
     }
 
     // Verify the rules were added
@@ -568,16 +637,16 @@ export async function enableLANPassthrough() {
     const forwardRules = await execAsync('sudo iptables -L FORWARD -n -v');
 
     if (!natRules.stdout.includes('MASQUERADE') || !natRules.stdout.includes('eth0')) {
-      console.warn('Warning: NAT MASQUERADE rule may not be active');
+      networkLogger.verboseWarn('NAT MASQUERADE rule may not be active');
     }
 
     if (!forwardRules.stdout.includes(INTERFACE) || !forwardRules.stdout.includes('eth0')) {
-      console.warn('Warning: FORWARD rules may not be active');
+      networkLogger.verboseWarn('FORWARD rules may not be active');
     }
 
-    console.log('LAN passthrough enabled successfully');
-    console.log('NAT rules:', natRules.stdout.split('\n').slice(0, 5).join('\n'));
-    console.log('FORWARD rules:', forwardRules.stdout.split('\n').slice(0, 5).join('\n'));
+    networkLogger.success('LAN passthrough enabled successfully');
+    networkLogger.verbose('NAT rules', { rules: natRules.stdout.split('\n').slice(0, 5) });
+    networkLogger.verbose('FORWARD rules', { rules: forwardRules.stdout.split('\n').slice(0, 5) });
 
     return {
       success: true,
@@ -589,7 +658,7 @@ export async function enableLANPassthrough() {
       }
     };
   } catch (err) {
-    console.error('Error enabling LAN passthrough:', err);
+    networkLogger.error('Error enabling LAN passthrough', { error: err.message });
     return {
       success: false,
       message: 'Failed to enable LAN passthrough',
@@ -603,7 +672,7 @@ export async function enableLANPassthrough() {
  */
 export async function disableLANPassthrough() {
   try {
-    console.log('Disabling LAN passthrough...');
+    networkLogger.verbose('Disabling LAN passthrough...');
 
     // Remove iptables rules - loop multiple times in case of duplicates
     for (let i = 0; i < 5; i++) {
@@ -624,6 +693,14 @@ export async function disableLANPassthrough() {
       await execAsync('sudo iptables -D INPUT -i wlan0 -p tcp --dport 53 -j ACCEPT 2>/dev/null || true');
     }
 
+    // Clean up device routing policy rules
+    networkLogger.verbose('Removing device routing policy...');
+    for (let i = 0; i < 3; i++) {
+      await execAsync('sudo ip rule del iif lo table 100 2>/dev/null || true');
+    }
+    await execAsync('sudo ip route flush table 100 2>/dev/null || true');
+    networkLogger.verbose('✓ Device routing policy removed');
+
     // Disable IP forwarding
     await execAsync('sudo sysctl -w net.ipv4.ip_forward=0');
     await execAsync('sudo sysctl -w net.ipv4.conf.all.forwarding=0');
@@ -638,13 +715,13 @@ export async function disableLANPassthrough() {
       // Ignore save errors
     }
 
-    console.log('LAN passthrough disabled');
+    networkLogger.success('LAN passthrough disabled');
     return {
       success: true,
       message: 'LAN passthrough disabled'
     };
   } catch (err) {
-    console.error('Error disabling LAN passthrough:', err);
+    networkLogger.error('Error disabling LAN passthrough', { error: err.message });
     return {
       success: false,
       message: 'Failed to disable LAN passthrough',
@@ -678,15 +755,15 @@ export async function setHostname(domain) {
       await execAsync('sudo cp /tmp/hosts.tmp /etc/hosts');
       await execAsync('sudo rm /tmp/hosts.tmp');
     } catch (err) {
-      console.warn('Failed to update /etc/hosts:', err.message);
+      networkLogger.verboseWarn('Failed to update /etc/hosts', { error: err.message });
     }
 
     // Restart Avahi for mDNS
     try {
       await execAsync('sudo systemctl restart avahi-daemon');
-      console.log(`mDNS hostname set to: ${hostname}.local`);
+      networkLogger.verbose(`mDNS hostname set to: ${hostname}.local`);
     } catch (err) {
-      console.warn('Avahi not available, mDNS may not work');
+      networkLogger.verboseWarn('Avahi not available, mDNS may not work');
     }
 
     return {
@@ -707,7 +784,7 @@ export async function setHostname(domain) {
  */
 export async function enableWiFiMode() {
   try {
-    console.log('Switching to WiFi mode...');
+    networkLogger.info('Switching to WiFi mode...');
 
     // Stop hotspot if running
     await stopHotspot();
@@ -733,13 +810,13 @@ export async function enableWiFiMode() {
     // Trigger auto-connect
     await execAsync(`sudo nmcli device reapply ${INTERFACE} 2>/dev/null || true`);
 
-    console.log('WiFi mode enabled - NetworkManager is now handling connections');
+    networkLogger.success('WiFi mode enabled');
     return {
       success: true,
       message: 'WiFi mode enabled'
     };
   } catch (err) {
-    console.error('Error enabling WiFi mode:', err);
+    networkLogger.error('Error enabling WiFi mode', { error: err.message });
     return {
       success: false,
       message: 'Failed to enable WiFi mode',
