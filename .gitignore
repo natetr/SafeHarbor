@@ -11,6 +11,7 @@ client/dist/
 # Database files
 *.db
 *.db-journal
+*.db.backup*
 
 # Logs
 *.log
