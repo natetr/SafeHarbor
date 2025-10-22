@@ -231,7 +231,7 @@ export default function AdminSystem() {
 
       <div className="card mb-3">
         <h2 className="card-header">System Information</h2>
-        <p><strong>Application:</strong> SafeHarbor v1.0.0</p>
+        <p><strong>Application:</strong> SafeHarbor v2.2.0</p>
         <p><strong>Environment:</strong> {import.meta.env.MODE}</p>
         <p className="text-muted mt-3">
           For more detailed system stats, see the Dashboard.
