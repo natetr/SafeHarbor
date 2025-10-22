@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
+import multer from 'multer';
 import { authenticateToken, requireAdmin, optionalAuth } from '../middleware/auth.js';
 import db, { safeDbRun, safeDbGet, safeDbAll } from '../database/init.js';
 import { spawn, execSync } from 'child_process';
@@ -43,6 +44,34 @@ let updateCheckStatus = {
   completedAt: null,
   error: null
 };
+
+// Configure multer for ZIM file uploads
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      // Ensure ZIM directory exists
+      if (!fs.existsSync(ZIM_DIR)) {
+        fs.mkdirSync(ZIM_DIR, { recursive: true });
+      }
+      cb(null, ZIM_DIR);
+    },
+    filename: (req, file, cb) => {
+      // Keep original filename for ZIM files
+      cb(null, file.originalname);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    // Only accept .zim files
+    if (file.originalname.toLowerCase().endsWith('.zim')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .zim files are allowed'));
+    }
+  },
+  limits: {
+    fileSize: 50 * 1024 * 1024 * 1024 // 50GB max file size
+  }
+});
 
 /**
  * Check if internet is available for catalog/downloads
@@ -1094,6 +1123,65 @@ router.get('/', optionalAuth, async (req, res) => {
   } catch (err) {
     console.error('Error fetching ZIM libraries:', err);
     res.status(500).json({ error: 'Failed to fetch ZIM libraries' });
+  }
+});
+
+// Upload ZIM file
+router.post('/upload', authenticateToken, requireAdmin, upload.single('zimFile'), async (req, res) => {
+  const opId = startOperation('zim_upload');
+
+  try {
+    if (!req.file) {
+      zimLogger('basic', 'Upload failed: No file provided');
+      endOperation(opId, 'failed');
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const uploadedFile = req.file;
+    zimLogger('basic', `ZIM file uploaded: ${uploadedFile.filename} (${(uploadedFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+
+    // Run orphaned ZIM cleanup to validate and add the uploaded file to the database
+    zimLogger('basic', `Validating and processing uploaded ZIM: ${uploadedFile.filename}`);
+    await cleanupOrphanedZims();
+
+    // Check if the file was successfully added to the database
+    const addedZim = await safeDbGet('SELECT * FROM zim_libraries WHERE filename = ?', [uploadedFile.filename]);
+
+    if (addedZim) {
+      zimLogger('basic', `Upload successful: ${addedZim.title} added to library (ID: ${addedZim.id})`);
+      endOperation(opId, 'success');
+
+      // Restart Kiwix to load the new ZIM
+      restartKiwixServer();
+
+      res.json({
+        success: true,
+        message: 'ZIM file uploaded and added to library successfully',
+        zim: addedZim
+      });
+    } else {
+      // File was uploaded but validation failed (cleanupOrphanedZims deleted it)
+      zimLogger('basic', `Upload failed: ${uploadedFile.filename} was invalid and removed`);
+      endOperation(opId, 'failed');
+      res.status(400).json({
+        error: 'Uploaded file was not a valid ZIM file and has been removed'
+      });
+    }
+  } catch (err) {
+    zimLogger('basic', `Upload error: ${err.message}`);
+    console.error('ZIM upload error:', err);
+    endOperation(opId, 'failed');
+
+    // Clean up the uploaded file if it exists
+    if (req.file && fs.existsSync(req.file.path)) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (unlinkErr) {
+        console.error('Failed to clean up invalid upload:', unlinkErr);
+      }
+    }
+
+    res.status(500).json({ error: err.message || 'Failed to upload ZIM file' });
   }
 });
 

@@ -17,6 +17,9 @@ export default function AdminZIM() {
   const [updateCheckStatus, setUpdateCheckStatus] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
   const [updatingZims, setUpdatingZims] = useState(new Set());
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   useEffect(() => {
     fetchLibraries();
@@ -424,6 +427,73 @@ export default function AdminZIM() {
     }
   };
 
+  const handleFileSelect = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      if (!file.name.toLowerCase().endsWith('.zim')) {
+        alert('Please select a .zim file');
+        e.target.value = '';
+        return;
+      }
+      setSelectedFile(file);
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      alert('Please select a file first');
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(0);
+
+    try {
+      const token = localStorage.getItem('token');
+      const formData = new FormData();
+      formData.append('zimFile', selectedFile);
+
+      const xhr = new XMLHttpRequest();
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          const percentComplete = Math.round((e.loaded / e.total) * 100);
+          setUploadProgress(percentComplete);
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status === 200) {
+          const response = JSON.parse(xhr.responseText);
+          alert(`Upload successful! ${response.zim?.title || selectedFile.name} has been added to your library.`);
+          setSelectedFile(null);
+          setUploadProgress(0);
+          fetchLibraries();
+          // Reset file input
+          document.getElementById('zim-file-input').value = '';
+        } else {
+          const error = JSON.parse(xhr.responseText);
+          alert('Upload failed: ' + (error.error || 'Unknown error'));
+        }
+        setUploading(false);
+      });
+
+      xhr.addEventListener('error', () => {
+        alert('Upload failed: Network error');
+        setUploading(false);
+      });
+
+      xhr.open('POST', '/api/zim/upload');
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.send(formData);
+
+    } catch (err) {
+      console.error('Upload failed:', err);
+      alert('Upload failed: ' + err.message);
+      setUploading(false);
+    }
+  };
+
   return (
     <div>
       <div className="flex-between mb-3">
@@ -437,6 +507,74 @@ export default function AdminZIM() {
       </div>
 
       <StorageInfo />
+
+      <div className="card mb-3">
+        <h2 className="card-header">Browse Kiwix Catalog</h2>
+        <p className="text-muted mb-3">
+          Browse popular ZIM libraries available from Kiwix.
+        </p>
+        <button
+          onClick={fetchCatalog}
+          disabled={loading}
+          className="btn btn-primary"
+        >
+          {loading ? 'Loading...' : 'Browse Catalog'}
+        </button>
+      </div>
+
+      <div className="card mb-3">
+        <h2 className="card-header">Upload ZIM File</h2>
+        <p className="text-muted mb-3">
+          Upload a ZIM file from your computer. The file will be validated and added to your library.
+        </p>
+        <div className="mb-3">
+          <input
+            id="zim-file-input"
+            type="file"
+            accept=".zim"
+            onChange={handleFileSelect}
+            disabled={uploading}
+            className="form-input"
+          />
+          {selectedFile && (
+            <p className="text-muted mt-2" style={{ fontSize: '0.875rem' }}>
+              Selected: <strong>{selectedFile.name}</strong> ({formatSize(selectedFile.size)})
+            </p>
+          )}
+        </div>
+        {uploading && (
+          <div className="mb-3">
+            <div className="flex-between mb-1">
+              <span>Uploading...</span>
+              <span>{uploadProgress}%</span>
+            </div>
+            <div style={{
+              width: '100%',
+              height: '8px',
+              background: 'var(--bg)',
+              borderRadius: '4px',
+              overflow: 'hidden'
+            }}>
+              <div style={{
+                width: `${uploadProgress}%`,
+                height: '100%',
+                background: 'var(--primary)',
+                transition: 'width 0.3s ease'
+              }} />
+            </div>
+          </div>
+        )}
+        <button
+          onClick={handleUpload}
+          disabled={!selectedFile || uploading}
+          className="btn btn-primary"
+        >
+          {uploading ? 'Uploading...' : 'Upload ZIM'}
+        </button>
+        <p className="text-muted mt-2" style={{ fontSize: '0.875rem' }}>
+          <strong>Note:</strong> Large ZIM files may take time to upload. The file will be validated after upload.
+        </p>
+      </div>
 
       <div className="card mb-3">
         <h2 className="card-header">Download ZIM by URL</h2>
@@ -497,20 +635,6 @@ export default function AdminZIM() {
           ))}
         </div>
       )}
-
-      <div className="card mb-3">
-        <h2 className="card-header">Browse Kiwix Catalog</h2>
-        <p className="text-muted mb-3">
-          Browse popular ZIM libraries available from Kiwix. Copy the download URL to use above.
-        </p>
-        <button
-          onClick={fetchCatalog}
-          disabled={loading}
-          className="btn btn-primary"
-        >
-          {loading ? 'Loading...' : 'Browse Catalog'}
-        </button>
-      </div>
 
       {showCatalog && catalog.length > 0 && (
         <div className="card mb-3">
