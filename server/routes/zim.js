@@ -1128,28 +1128,28 @@ router.get('/', optionalAuth, async (req, res) => {
 
 // Upload ZIM file
 router.post('/upload', authenticateToken, requireAdmin, upload.single('zimFile'), async (req, res) => {
-  const opId = startOperation('zim_upload');
+  const opId = startOperation('zim_upload', 'file');
 
   try {
     if (!req.file) {
-      zimLogger('basic', 'Upload failed: No file provided');
-      endOperation(opId, 'failed');
+      zimLogger.file.error('Upload failed: No file provided');
+      endOperation(opId, false);
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
     const uploadedFile = req.file;
-    zimLogger('basic', `ZIM file uploaded: ${uploadedFile.filename} (${(uploadedFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+    zimLogger.file.info(`ZIM file uploaded: ${uploadedFile.filename} (${(uploadedFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
 
     // Run orphaned ZIM cleanup to validate and add the uploaded file to the database
-    zimLogger('basic', `Validating and processing uploaded ZIM: ${uploadedFile.filename}`);
+    zimLogger.file.info(`Validating and processing uploaded ZIM: ${uploadedFile.filename}`);
     await cleanupOrphanedZims();
 
     // Check if the file was successfully added to the database
     const addedZim = await safeDbGet('SELECT * FROM zim_libraries WHERE filename = ?', [uploadedFile.filename]);
 
     if (addedZim) {
-      zimLogger('basic', `Upload successful: ${addedZim.title} added to library (ID: ${addedZim.id})`);
-      endOperation(opId, 'success');
+      zimLogger.file.success(`Upload successful: ${addedZim.title} added to library (ID: ${addedZim.id})`);
+      endOperation(opId, true);
 
       // Restart Kiwix to load the new ZIM
       restartKiwixServer();
@@ -1161,16 +1161,16 @@ router.post('/upload', authenticateToken, requireAdmin, upload.single('zimFile')
       });
     } else {
       // File was uploaded but validation failed (cleanupOrphanedZims deleted it)
-      zimLogger('basic', `Upload failed: ${uploadedFile.filename} was invalid and removed`);
-      endOperation(opId, 'failed');
+      zimLogger.file.error(`Upload failed: ${uploadedFile.filename} was invalid and removed`);
+      endOperation(opId, false);
       res.status(400).json({
         error: 'Uploaded file was not a valid ZIM file and has been removed'
       });
     }
   } catch (err) {
-    zimLogger('basic', `Upload error: ${err.message}`);
+    zimLogger.file.error(`Upload error: ${err.message}`);
     console.error('ZIM upload error:', err);
-    endOperation(opId, 'failed');
+    endOperation(opId, false);
 
     // Clean up the uploaded file if it exists
     if (req.file && fs.existsSync(req.file.path)) {
